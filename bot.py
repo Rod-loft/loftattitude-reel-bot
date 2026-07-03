@@ -1,4 +1,4 @@
-import os, time, random, requests, schedule, anthropic, json, base64
+import os, time, random, re, requests, schedule, anthropic, json, base64
 from datetime import datetime
 from bs4 import BeautifulSoup
 
@@ -50,42 +50,53 @@ def save_state(state):
 
 # ------------------------------------------------------- scraping marques --
 
+# Motif d'URL produit du site, ex:
+# https://www.loftattitude.com/fr/chaise/16626-chaise-de-salle-a-manger-oasis-naturel-gwen-8721009431849.html
+# Independant des classes CSS (contrairement a .product-miniature qui a change
+# de structure sur les pages marque et renvoyait 0 resultat).
+PRODUCT_URL_PATTERN = re.compile(
+    r"https://www\.loftattitude\.com/fr/[a-z0-9\-]+/\d+-[a-z0-9\-]+\.html"
+)
+
+
 def scrape_brand_products(brand_slug):
-    """Recupere tous les produits d'une page marque (nom, prix, image, url).
-    resultsPerPage=99999 evite de paginer sur plusieurs pages."""
-    url = f"https://www.loftattitude.com/fr/brand/{brand_slug}?resultsPerPage=99999"
+    """Recupere les URLs produits de la 1ere page d'une marque (24 produits).
+    Extraction par motif d'URL, insensible aux changements de classes CSS."""
+    url = f"https://www.loftattitude.com/fr/brand/{brand_slug}"
     try:
         r = requests.get(url, headers=HEADERS, timeout=20)
-        soup = BeautifulSoup(r.text, "html.parser")
-        products = []
-        for item in soup.select(".product-miniature"):
-            name_el  = item.select_one(".product-title")
-            price_el = item.select_one(".price")
-            img_el   = item.select_one("img")
-            link_el  = item.select_one("a")
-
-            img_url = ""
-            if img_el:
-                img_url = img_el.get("data-src") or img_el.get("src") or ""
-                if img_url.startswith("/"):
-                    img_url = "https://www.loftattitude.com" + img_url
-
-            href = link_el.get("href", "") if link_el else ""
-            product_url = href if href.startswith("http") else ("https://www.loftattitude.com" + href if href else "")
-            if not product_url:
-                continue
-
-            products.append({
-                "nom":       name_el.text.strip()  if name_el  else "Nouveau produit design",
-                "prix":      price_el.text.strip() if price_el else "",
-                "image_url": img_url,
-                "url":       product_url,
-            })
-        print(f"Marque {brand_slug}: {len(products)} produits trouves")
-        return products
+        urls = sorted(set(PRODUCT_URL_PATTERN.findall(r.text)))
+        print(f"Marque {brand_slug}: {len(urls)} produits trouves")
+        return urls
     except Exception as e:
         print(f"Erreur scraping marque {brand_slug}: {e}")
         return []
+
+
+def get_product_details(product_url):
+    """Recupere nom, prix et image principale d'une fiche produit via les
+    balises meta (og:title, product:price:amount, og:image), plus fiables
+    que les classes CSS qui varient selon les templates de page."""
+    try:
+        r = requests.get(product_url, headers=HEADERS, timeout=15)
+        html = r.text
+
+        nom_match = re.search(r'property="og:title"\s+content="([^"]+)"', html)
+        nom = nom_match.group(1).strip() if nom_match else "Nouveau produit design"
+        for suffix in [" | Loft Attitude", " - Loft Attitude"]:
+            if nom.endswith(suffix):
+                nom = nom[: -len(suffix)]
+
+        price_match = re.search(r'property="product:price:amount"\s+content="([\d.,]+)"', html)
+        prix = f"{price_match.group(1)} €" if price_match else ""
+
+        img_match = re.search(r'property="og:image"\s+content="([^"]+)"', html)
+        image_url = img_match.group(1) if img_match else ""
+
+        return {"nom": nom, "prix": prix, "image_url": image_url, "url": product_url}
+    except Exception as e:
+        print(f"Erreur recuperation details produit: {e}")
+        return {"nom": "Nouveau produit design", "prix": "", "image_url": "", "url": product_url}
 
 
 def get_next_priority_product(state):
@@ -99,12 +110,12 @@ def get_next_priority_product(state):
         ordered = brand_names[start:] + brand_names[:start]
         for brand in ordered:
             print(f"Recherche produit disponible sur la marque '{brand}'...")
-            products = scrape_brand_products(BRANDS[brand])
-            candidates = [p for p in products if p["url"] not in exclude_urls]
+            urls = scrape_brand_products(BRANDS[brand])
+            candidates = [u for u in urls if u not in exclude_urls]
             if candidates:
                 choice = random.choice(candidates)
-                print(f"Produit retenu ({brand}): {choice['nom']}")
-                return choice
+                print(f"Produit retenu ({brand}): {choice}")
+                return get_product_details(choice)
         return None
 
     product = try_pick(posted)
@@ -116,8 +127,7 @@ def get_next_priority_product(state):
     print("Toutes les marques prioritaires ont ete publiees au moins une fois. Nouveau cycle.")
     all_brand_urls = set()
     for slug in BRANDS.values():
-        for p in scrape_brand_products(slug):
-            all_brand_urls.add(p["url"])
+        all_brand_urls.update(scrape_brand_products(slug))
     posted_outside_brands = posted - all_brand_urls
     return try_pick(posted_outside_brands)
 
