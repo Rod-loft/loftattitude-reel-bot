@@ -1,4 +1,4 @@
-import os, time, requests, schedule, anthropic, json, base64
+import os, time, random, requests, schedule, anthropic, json, base64
 from datetime import datetime
 from bs4 import BeautifulSoup
 
@@ -6,6 +6,123 @@ IG_USER_ID = os.environ.get("IG_USER_ID", "17841400937343787")
 IG_TOKEN   = os.environ.get("IG_ACCESS_TOKEN", "")
 CLAUDE_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 IG_BASE    = "https://graph.instagram.com/v21.0"
+
+# Fichier d'historique des produits deja publies (persiste entre redemarrages
+# si un volume Railway est monte sur /data, sinon reinitialise a chaque deploiement)
+STATE_FILE = os.environ.get("STATE_FILE", "./posted.json")
+
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+# ---------------------------------------------------------------------------
+# MARQUES PRIORITAIRES
+# Le bot ne publie plus le "dernier produit" toutes marques confondues :
+# il tourne exclusivement sur ces 5 marques, une a une, sans jamais en
+# sortir, meme quand tout le stock de ces marques a deja ete publie
+# (dans ce cas, un nouveau cycle redemarre sur ces memes 5 marques).
+# ---------------------------------------------------------------------------
+BRANDS = {
+    "richmond-interiors": "66-richmond-interiors",
+    "sompex":              "15-sompex",
+    "socadis":             "55-socadis",
+    "villeroy-boch":       "62-villeroy-boch",
+    "kare-design":         "7-kare-design",
+}
+
+
+# ------------------------------------------------------------- historique --
+
+def load_state():
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"posted_urls": []}
+
+
+def save_state(state):
+    try:
+        os.makedirs(os.path.dirname(STATE_FILE) or ".", exist_ok=True)
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Erreur sauvegarde historique: {e}")
+
+
+# ------------------------------------------------------- scraping marques --
+
+def scrape_brand_products(brand_slug):
+    """Recupere tous les produits d'une page marque (nom, prix, image, url).
+    resultsPerPage=99999 evite de paginer sur plusieurs pages."""
+    url = f"https://www.loftattitude.com/fr/brand/{brand_slug}?resultsPerPage=99999"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=20)
+        soup = BeautifulSoup(r.text, "html.parser")
+        products = []
+        for item in soup.select(".product-miniature"):
+            name_el  = item.select_one(".product-title")
+            price_el = item.select_one(".price")
+            img_el   = item.select_one("img")
+            link_el  = item.select_one("a")
+
+            img_url = ""
+            if img_el:
+                img_url = img_el.get("data-src") or img_el.get("src") or ""
+                if img_url.startswith("/"):
+                    img_url = "https://www.loftattitude.com" + img_url
+
+            href = link_el.get("href", "") if link_el else ""
+            product_url = href if href.startswith("http") else ("https://www.loftattitude.com" + href if href else "")
+            if not product_url:
+                continue
+
+            products.append({
+                "nom":       name_el.text.strip()  if name_el  else "Nouveau produit design",
+                "prix":      price_el.text.strip() if price_el else "",
+                "image_url": img_url,
+                "url":       product_url,
+            })
+        print(f"Marque {brand_slug}: {len(products)} produits trouves")
+        return products
+    except Exception as e:
+        print(f"Erreur scraping marque {brand_slug}: {e}")
+        return []
+
+
+def get_next_priority_product(state):
+    """Choisit le prochain produit a publier EXCLUSIVEMENT parmi les 5
+    marques prioritaires, en les faisant tourner une a une."""
+    posted = set(state.get("posted_urls", []))
+    brand_names = list(BRANDS.keys())
+
+    def try_pick(exclude_urls):
+        start = len(posted) % len(brand_names)
+        ordered = brand_names[start:] + brand_names[:start]
+        for brand in ordered:
+            print(f"Recherche produit disponible sur la marque '{brand}'...")
+            products = scrape_brand_products(BRANDS[brand])
+            candidates = [p for p in products if p["url"] not in exclude_urls]
+            if candidates:
+                choice = random.choice(candidates)
+                print(f"Produit retenu ({brand}): {choice['nom']}")
+                return choice
+        return None
+
+    product = try_pick(posted)
+    if product:
+        return product
+
+    # Les 5 marques sont epuisees (tout a deja ete publie au moins une fois) :
+    # on relance un cycle sur ces memes marques, sans jamais sortir du perimetre
+    print("Toutes les marques prioritaires ont ete publiees au moins une fois. Nouveau cycle.")
+    all_brand_urls = set()
+    for slug in BRANDS.values():
+        for p in scrape_brand_products(slug):
+            all_brand_urls.add(p["url"])
+    posted_outside_brands = posted - all_brand_urls
+    return try_pick(posted_outside_brands)
+
+
+# ------------------------------------------------------------------- bio --
 
 def update_bio_link(product_url, product_name):
     """Met a jour le lien de la bio Instagram avec l'URL du produit"""
@@ -27,11 +144,13 @@ def update_bio_link(product_url, product_name):
         print(f"Erreur bio: {e}")
         return False
 
+
+# ---------------------------------------------------------------- images --
+
 def get_product_images(product_url):
     """Scrape toutes les images d'une fiche produit"""
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        r = requests.get(product_url, headers=headers, timeout=15)
+        r = requests.get(product_url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(r.text, "html.parser")
         images = []
         selectors = [
@@ -62,6 +181,7 @@ def get_product_images(product_url):
         print(f"Erreur scraping images: {e}")
         return []
 
+
 def is_lifestyle_image(image_url):
     """Detecte si une image est lifestyle via Claude Vision"""
     try:
@@ -88,6 +208,7 @@ def is_lifestyle_image(image_url):
         print(f"Erreur analyse image: {e}")
         return False, 0
 
+
 def select_best_images(images, max_images=5):
     """Selectionne les meilleures images en prioritisant le lifestyle"""
     if not images:
@@ -106,34 +227,8 @@ def select_best_images(images, max_images=5):
     print(f"Selection: {len(best)} images ({lifestyle_count} lifestyle)")
     return best
 
-def get_latest_product():
-    """Recupere le dernier produit depuis loftattitude.com"""
-    try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        r = requests.get("https://www.loftattitude.com/fr/nouveaux-produits", headers=headers, timeout=15)
-        soup = BeautifulSoup(r.text, "html.parser")
-        product = soup.select_one(".product-miniature")
-        if not product:
-            print("Aucun produit trouve")
-            return None
-        name_el  = product.select_one(".product-title")
-        price_el = product.select_one(".price")
-        img_el   = product.select_one("img")
-        link_el  = product.select_one("a")
-        img_url = img_el.get("data-src") or img_el.get("src") if img_el else ""
-        if img_url and img_url.startswith("/"):
-            img_url = "https://www.loftattitude.com" + img_url
-        href = link_el.get("href", "") if link_el else ""
-        product_url = href if href.startswith("http") else "https://www.loftattitude.com" + href
-        return {
-            "nom":       name_el.text.strip()  if name_el  else "Nouveau produit design",
-            "prix":      price_el.text.strip() if price_el else "",
-            "image_url": img_url,
-            "url":       product_url or "https://www.loftattitude.com",
-        }
-    except Exception as e:
-        print(f"Erreur scraping produit: {e}")
-        return None
+
+# --------------------------------------------------------------- caption --
 
 def generate_caption(product):
     """Genere caption + hashtags avec Claude"""
@@ -150,6 +245,9 @@ def generate_caption(product):
     except Exception as e:
         print(f"Erreur caption: {e}")
         return f"Nouvelle arrivee chez Loft Attitude ! {product['nom']} - {product['prix']}\nRetrouvez ce produit via le lien en bio 👆 loftattitude.com\n\n#loftattitude #design #deco #meuble #loftdesign"
+
+
+# ------------------------------------------------------------ publication --
 
 def publish_carousel(images, caption):
     """Publie un carrousel ou image simple"""
@@ -206,6 +304,7 @@ def publish_carousel(images, caption):
     print(f"Erreur: {result3}")
     return False
 
+
 def publish_single(image_url, caption):
     """Publie une image simple"""
     r1 = requests.post(f"{IG_BASE}/{IG_USER_ID}/media", data={
@@ -228,16 +327,21 @@ def publish_single(image_url, caption):
         return True
     return False
 
+
+# ------------------------------------------------------------------- job --
+
 def daily_job():
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n{'='*50}")
     print(f"[{now}] Debut publication Loft Attitude")
     print(f"{'='*50}")
 
-    # 1. Produit
-    product = get_latest_product()
+    state = load_state()
+
+    # 1. Produit (exclusivement parmi les 5 marques prioritaires)
+    product = get_next_priority_product(state)
     if not product:
-        print("Pas de produit disponible.")
+        print("Pas de produit disponible dans les marques prioritaires.")
         return
     print(f"Produit: {product['nom']}")
     print(f"URL: {product['url']}")
@@ -265,11 +369,18 @@ def daily_job():
     success = publish_carousel(best_images, caption)
     print("Reussi !" if success else "Echec.")
 
+    # 7. Historique (uniquement si succes, pour reessayer ce produit sinon)
+    if success:
+        state.setdefault("posted_urls", []).append(product["url"])
+        save_state(state)
+
+
 if __name__ == "__main__":
-    print("Bot Loft Attitude v3 - Lifestyle + Carrousel + Bio")
+    print("Bot Loft Attitude v4 - Marques prioritaires + Lifestyle + Carrousel + Bio")
     print(f"IG_USER_ID: {IG_USER_ID}")
     print(f"Token: {'OK' if IG_TOKEN else 'MANQUANT'}")
     print(f"Claude: {'OK' if CLAUDE_KEY else 'MANQUANT'}")
+    print(f"Marques prioritaires: {', '.join(BRANDS.keys())}")
     print("Publication planifiee a 09:00\n")
     daily_job()
     schedule.every().day.at("09:00").do(daily_job)
