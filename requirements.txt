@@ -1,4 +1,6 @@
-anthropic
 requests
 beautifulsoup4
 schedule
+anthropic
+Pillow
+flask
