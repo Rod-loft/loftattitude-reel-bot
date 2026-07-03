@@ -1,6 +1,9 @@
-import os, time, random, re, requests, schedule, anthropic, json, base64
+import os, time, random, re, requests, schedule, anthropic, json, base64, threading
 from datetime import datetime
+from io import BytesIO
 from bs4 import BeautifulSoup
+from PIL import Image, ImageFilter
+from flask import Flask, send_from_directory
 
 IG_USER_ID = os.environ.get("IG_USER_ID", "17841400937343787")
 IG_TOKEN   = os.environ.get("IG_ACCESS_TOKEN", "")
@@ -12,6 +15,69 @@ IG_BASE    = "https://graph.instagram.com/v21.0"
 STATE_FILE = os.environ.get("STATE_FILE", "./posted.json")
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+# ---------------------------------------------------------------------------
+# FORMATAGE IMAGES AU FORMAT INSTAGRAM (4:5 portrait)
+# Les photos du site n'ont pas toutes le meme ratio. On les retravaille pour
+# qu'elles s'affichent correctement sur Instagram, SANS jamais couper le
+# produit ni le deformer : l'image complete est centree sur un fond flou
+# genere a partir d'elle-meme. Les images formatees sont servies par un
+# petit serveur web integre a ce meme service Railway (public si un domaine
+# est genere dans Railway > Networking > Generate Domain).
+# ---------------------------------------------------------------------------
+STATIC_DIR      = os.environ.get("STATIC_DIR", "./static_images")
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+PORT            = int(os.environ.get("PORT", "8080"))
+TARGET_W, TARGET_H = 1080, 1350  # format 4:5, recommande par Instagram
+
+os.makedirs(STATIC_DIR, exist_ok=True)
+
+flask_app = Flask(__name__)
+
+
+@flask_app.route("/img/<path:filename>")
+def serve_image(filename):
+    return send_from_directory(STATIC_DIR, filename)
+
+
+def run_web_server():
+    flask_app.run(host="0.0.0.0", port=PORT)
+
+
+def format_image_for_instagram(image_url, filename):
+    """Telecharge une image, la recadre au format Instagram (4:5) sans
+    deformation ni coupe du produit, avec un fond flou en remplissage.
+    Sauvegarde localement et retourne l'URL publique."""
+    try:
+        r = requests.get(image_url, headers=HEADERS, timeout=15)
+        r.raise_for_status()
+        img = Image.open(BytesIO(r.content)).convert("RGB")
+
+        # Fond : l'image agrandie pour couvrir tout le cadre, puis floutee
+        bg_ratio = max(TARGET_W / img.width, TARGET_H / img.height)
+        bg = img.resize((int(img.width * bg_ratio) + 1, int(img.height * bg_ratio) + 1))
+        left = (bg.width - TARGET_W) // 2
+        top = (bg.height - TARGET_H) // 2
+        bg = bg.crop((left, top, left + TARGET_W, top + TARGET_H))
+        bg = bg.filter(ImageFilter.GaussianBlur(40))
+
+        # Premier plan : l'image entiere, redimensionnee sans deformation ni coupe
+        fg_ratio = min(TARGET_W / img.width, TARGET_H / img.height)
+        fg = img.resize((max(1, int(img.width * fg_ratio)), max(1, int(img.height * fg_ratio))))
+        fg_x = (TARGET_W - fg.width) // 2
+        fg_y = (TARGET_H - fg.height) // 2
+        bg.paste(fg, (fg_x, fg_y))
+
+        path = os.path.join(STATIC_DIR, filename)
+        bg.save(path, "JPEG", quality=90)
+
+        if not PUBLIC_BASE_URL:
+            print("PUBLIC_BASE_URL non configure : impossible de generer une URL publique")
+            return None
+        return f"{PUBLIC_BASE_URL}/img/{filename}"
+    except Exception as e:
+        print(f"Erreur formatage image {image_url}: {e}")
+        return None
 
 # ---------------------------------------------------------------------------
 # MARQUES PRIORITAIRES
@@ -371,12 +437,24 @@ def daily_job():
         print("Pas d'images.")
         return
 
+    # 4bis. Formatage au format Instagram (4:5, sans coupe ni deformation)
+    print("Formatage des images au format Instagram...")
+    formatted_images = []
+    for i, img_url in enumerate(best_images):
+        filename = f"{int(time.time())}_{i}.jpg"
+        public_url = format_image_for_instagram(img_url, filename)
+        if public_url:
+            formatted_images.append(public_url)
+    if not formatted_images:
+        print("Echec du formatage des images, publication annulee.")
+        return
+
     # 5. Caption
     caption = generate_caption(product)
     print(f"Caption: {len(caption)} caracteres")
 
     # 6. Publication
-    success = publish_carousel(best_images, caption)
+    success = publish_carousel(formatted_images, caption)
     print("Reussi !" if success else "Echec.")
 
     # 7. Historique (uniquement si succes, pour reessayer ce produit sinon)
@@ -386,12 +464,16 @@ def daily_job():
 
 
 if __name__ == "__main__":
-    print("Bot Loft Attitude v4 - Marques prioritaires + Lifestyle + Carrousel + Bio")
+    print("Bot Loft Attitude v4 - Marques prioritaires + Lifestyle + Carrousel + Bio + Formatage Instagram")
     print(f"IG_USER_ID: {IG_USER_ID}")
     print(f"Token: {'OK' if IG_TOKEN else 'MANQUANT'}")
     print(f"Claude: {'OK' if CLAUDE_KEY else 'MANQUANT'}")
     print(f"Marques prioritaires: {', '.join(BRANDS.keys())}")
+    print(f"URL publique images: {PUBLIC_BASE_URL if PUBLIC_BASE_URL else 'NON CONFIGUREE (a definir dans Railway)'}")
     print("Publication planifiee a 09:00\n")
+
+    threading.Thread(target=run_web_server, daemon=True).start()
+
     daily_job()
     schedule.every().day.at("09:00").do(daily_job)
     while True:
