@@ -40,7 +40,7 @@ def generate_caption(product):
     try:
         client = anthropic.Anthropic(api_key=CLAUDE_KEY)
         msg = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=600,
             system="""Tu es expert marketing Instagram pour "Loft Attitude", boutique de meubles et objets design loft, industriel et contemporain.
 Reponds UNIQUEMENT en JSON valide sans markdown:
