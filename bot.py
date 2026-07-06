@@ -1,7 +1,7 @@
 import os, time, requests, schedule, anthropic, json, base64, io
 from datetime import datetime
 from bs4 import BeautifulSoup
-from PIL import Image, ImageFilter, ImageEnhance
+from PIL import Image, ImageEnhance
 
 IG_USER_ID   = os.environ.get("IG_USER_ID", "17841400937343787")
 IG_TOKEN     = os.environ.get("IG_ACCESS_TOKEN", "")
@@ -41,43 +41,38 @@ def mark_as_published(product_url):
 # ─── TRAITEMENT IMAGE ─────────────────────────────────────────────────────────
 
 def crop_to_45(image_bytes):
-    """Recadre en 4:5 (1080x1350) avec fond flouté — zero bande blanche"""
+    """
+    Recadre TOUJOURS en 4:5 (1080x1350) en zoomant/coupant au centre.
+    ZERO bande blanche — l'image remplit toujours tout le cadre.
+    """
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         w, h = img.size
         target_w, target_h = 1080, 1350
-        target_ratio = target_w / target_h
+        target_ratio = target_w / target_h  # 0.8
         src_ratio = w / h
 
-        # Fond flouté et assombri dans tous les cas
-        bg = img.resize((target_w, target_h), Image.LANCZOS)
-        bg = bg.filter(ImageFilter.GaussianBlur(radius=40))
-        bg = ImageEnhance.Brightness(bg).enhance(0.45)
-        canvas = bg.copy()
-
         if src_ratio > target_ratio:
-            # Image paysage : pleine hauteur, bords floutés
+            # Image plus large que 4:5 (ex: paysage 16:9)
+            # → on redimensionne par la hauteur et on coupe les côtés
             new_h = target_h
             new_w = int(new_h * src_ratio)
             img_resized = img.resize((new_w, new_h), Image.LANCZOS)
-            x = (target_w - new_w) // 2
-            canvas.paste(img_resized, (x, 0))
+            # Coupe au centre
+            left = (new_w - target_w) // 2
+            img_cropped = img_resized.crop((left, 0, left + target_w, target_h))
         else:
-            # Image portrait ou carrée : pleine largeur
+            # Image plus haute que 4:5 (ex: portrait, carré)
+            # → on redimensionne par la largeur et on coupe haut/bas
             new_w = target_w
             new_h = int(new_w / src_ratio)
             img_resized = img.resize((new_w, new_h), Image.LANCZOS)
-            if new_h >= target_h:
-                # Recadre au centre
-                top = (new_h - target_h) // 2
-                canvas.paste(img_resized.crop((0, top, new_w, top + target_h)), (0, 0))
-            else:
-                # Centre verticalement
-                y = (target_h - new_h) // 2
-                canvas.paste(img_resized, (0, y))
+            # Coupe au centre
+            top = (new_h - target_h) // 2
+            img_cropped = img_resized.crop((0, top, target_w, top + target_h))
 
         output = io.BytesIO()
-        canvas.save(output, format="JPEG", quality=92)
+        img_cropped.save(output, format="JPEG", quality=92)
         return output.getvalue()
 
     except Exception as e:
@@ -133,7 +128,7 @@ def get_product_images(product_url):
                 if src and src not in seen and any(ext in src.lower() for ext in [".jpg", ".jpeg", ".png", ".webp"]):
                     if not any(skip in src.lower() for skip in ["logo", "icon", "sprite", "thumb", "mini", "cart"]):
                         seen.add(src)
-                        src_large = src.replace("-small", "").replace("-medium", "").replace("_small", "").replace("_medium", "")
+                        src_large = src.replace("-small","").replace("-medium","").replace("_small","").replace("_medium","")
                         images.append(src_large)
         print(f"Images trouvees: {len(images)}")
         return images
@@ -160,7 +155,7 @@ def is_lifestyle_image(image_url):
                 ]
             }]
         )
-        result = json.loads(msg.content[0].text.replace("```json", "").replace("```", "").strip())
+        result = json.loads(msg.content[0].text.replace("```json","").replace("```","").strip())
         return result.get("lifestyle", False), result.get("score", 0)
     except Exception as e:
         print(f"Erreur analyse image: {e}")
@@ -192,7 +187,7 @@ def get_next_product():
         if not products:
             print("Aucun produit trouve")
             return None
-        print(f"{len(products)} produits trouves sur la page")
+        print(f"{len(products)} produits trouves")
         for product in products:
             name_el  = product.select_one(".product-title")
             price_el = product.select_one(".price")
@@ -206,7 +201,7 @@ def get_next_product():
             if not product_url:
                 continue
             if already_published(product_url):
-                print(f"Deja publie, on passe: {product_url}")
+                print(f"Deja publie: {product_url}")
                 continue
             print(f"Nouveau produit: {name_el.text.strip() if name_el else 'Inconnu'}")
             return {
@@ -218,7 +213,7 @@ def get_next_product():
         print("Tous les produits ont deja ete publies !")
         return None
     except Exception as e:
-        print(f"Erreur scraping produit: {e}")
+        print(f"Erreur scraping: {e}")
         return None
 
 # ─── CAPTION ──────────────────────────────────────────────────────────────────
@@ -232,7 +227,7 @@ def generate_caption(product):
             system='Tu es expert marketing Instagram pour "Loft Attitude", boutique de meubles et objets design loft, industriel et contemporain. Reponds UNIQUEMENT en JSON valide sans markdown: {"caption":"caption Instagram 120-150 mots avec emojis, storytelling produit, ambiance design, termine TOUJOURS par : Retrouvez ce produit via le lien en bio 👆 loftattitude.com","hashtags":["25 hashtags pertinents"]}',
             messages=[{"role": "user", "content": f"Produit: {product['nom']}\nPrix: {product['prix']}\nURL: {product['url']}"}]
         )
-        data = json.loads(msg.content[0].text.replace("```json", "").replace("```", "").strip())
+        data = json.loads(msg.content[0].text.replace("```json","").replace("```","").strip())
         return data["caption"] + "\n\n" + " ".join(data["hashtags"])
     except Exception as e:
         print(f"Erreur caption: {e}")
@@ -292,21 +287,33 @@ def publish_instagram(images_urls, caption):
     if "id" in result3:
         print(f"Instagram carrousel OK ! ID: {result3['id']}")
         return True
-    print(f"Erreur publication: {result3}")
+    print(f"Erreur: {result3}")
     return False
 
 def publish_facebook(images_urls, caption, product_url):
-    """Publie sur la Page Facebook en utilisant le token Instagram"""
     if not FB_PAGE_ID or not IG_TOKEN:
-        print("Facebook non configure - ignore")
+        print("Facebook non configure")
         return False
     try:
-        print(f"Publication Facebook sur la page {FB_PAGE_ID}...")
+        print(f"Publication Facebook sur {FB_PAGE_ID}...")
+        # Recupere le token de Page automatiquement
+        r_pages = requests.get(f"{FB_BASE}/me/accounts", params={"access_token": IG_TOKEN})
+        pages = r_pages.json().get("data", [])
+        page_token = None
+        for page in pages:
+            if page.get("id") == FB_PAGE_ID:
+                page_token = page.get("access_token")
+                print(f"Token Page trouve: {page.get('name')}")
+                break
+        if not page_token:
+            print(f"Token Page non trouve. Pages: {[p.get('name') for p in pages]}")
+            return False
+
         if len(images_urls) == 1:
             r = requests.post(f"{FB_BASE}/{FB_PAGE_ID}/photos", data={
-                "url":          images_urls[0],
-                "caption":      caption + f"\n\n🔗 {product_url}",
-                "access_token": IG_TOKEN,
+                "url": images_urls[0],
+                "caption": caption + f"\n\n🔗 {product_url}",
+                "access_token": page_token,
             })
             result = r.json()
             if "id" in result:
@@ -319,30 +326,25 @@ def publish_facebook(images_urls, caption, product_url):
         for i, img_url in enumerate(images_urls):
             print(f"  Upload Facebook photo {i+1}...")
             r = requests.post(f"{FB_BASE}/{FB_PAGE_ID}/photos", data={
-                "url":          img_url,
-                "published":    "false",
-                "access_token": IG_TOKEN,
+                "url": img_url, "published": "false", "access_token": page_token,
             })
             result = r.json()
             if "id" in result:
                 photo_ids.append({"media_fbid": result["id"]})
             else:
-                print(f"  Erreur photo: {result}")
-
+                print(f"  Erreur: {result}")
         if not photo_ids:
-            print("Aucune photo uploadee sur Facebook")
             return False
-
         r2 = requests.post(f"{FB_BASE}/{FB_PAGE_ID}/feed", data={
-            "message":        caption + f"\n\n🔗 {product_url}",
+            "message": caption + f"\n\n🔗 {product_url}",
             "attached_media": json.dumps(photo_ids),
-            "access_token":   IG_TOKEN,
+            "access_token": page_token,
         })
         result2 = r2.json()
         if "id" in result2:
             print(f"Facebook OK avec {len(photo_ids)} photos ! ID: {result2['id']}")
             return True
-        print(f"Erreur Facebook post: {result2}")
+        print(f"Erreur Facebook: {result2}")
         return False
     except Exception as e:
         print(f"Erreur Facebook: {e}")
@@ -358,10 +360,9 @@ def daily_job():
 
     product = get_next_product()
     if not product:
-        print("Pas de nouveau produit a publier aujourd'hui.")
+        print("Pas de nouveau produit aujourd'hui.")
         return
     print(f"Produit: {product['nom']} | Prix: {product['prix']}")
-    print(f"URL: {product['url']}")
 
     all_images = get_product_images(product["url"]) if product["url"] else []
     if not all_images and product["image_url"]:
@@ -372,7 +373,7 @@ def daily_job():
         print("Pas d'images.")
         return
 
-    print("\nRecadrage 4:5 et upload...")
+    print("\nRecadrage 4:5 (zoom centre, zero bande) + upload...")
     processed_urls = []
     for i, img_url in enumerate(best_images):
         print(f"  Traitement image {i+1}...")
@@ -380,10 +381,9 @@ def daily_job():
         processed_urls.append(public_url if public_url else img_url)
 
     if not processed_urls:
-        print("Pas d'images traitees.")
         return
 
-    print(f"{len(processed_urls)} images pretes (4:5, fond floute)")
+    print(f"{len(processed_urls)} images pretes (4:5 plein cadre)")
 
     caption = generate_caption(product)
     print(f"Caption: {len(caption)} caracteres")
@@ -404,7 +404,7 @@ def daily_job():
 # ─── LANCEMENT ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print("Bot Loft Attitude v6 - FB avec token IG + fond floute + anti-doublon")
+    print("Bot Loft Attitude v8 - Zoom centre (zero bande) + FB auto token")
     print(f"IG_USER_ID:  {IG_USER_ID}")
     print(f"FB_PAGE_ID:  {FB_PAGE_ID}")
     print(f"IMGBB:       {'OK' if IMGBB_KEY else 'MANQUANT'}")
