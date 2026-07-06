@@ -1,244 +1,92 @@
-import os, time, random, re, requests, schedule, anthropic, json, base64, threading
+import os, time, requests, schedule, anthropic, json, base64, io
 from datetime import datetime
-from io import BytesIO
 from bs4 import BeautifulSoup
-from PIL import Image, ImageFilter
-from flask import Flask, send_from_directory
+from PIL import Image
 
-IG_USER_ID = os.environ.get("IG_USER_ID", "17841400937343787")
-IG_TOKEN   = os.environ.get("IG_ACCESS_TOKEN", "")
-CLAUDE_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-IG_BASE    = "https://graph.instagram.com/v21.0"
+IG_USER_ID   = os.environ.get("IG_USER_ID", "17841400937343787")
+IG_TOKEN     = os.environ.get("IG_ACCESS_TOKEN", "")
+CLAUDE_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
+IMGBB_KEY    = os.environ.get("IMGBB_API_KEY", "")
+FB_PAGE_ID   = os.environ.get("FB_PAGE_ID", "")
+FB_TOKEN     = os.environ.get("FB_PAGE_TOKEN", "")
+IG_BASE      = "https://graph.instagram.com/v21.0"
+FB_BASE      = "https://graph.facebook.com/v21.0"
 
-# Fichier d'historique des produits deja publies (persiste entre redemarrages
-# si un volume Railway est monte sur /data, sinon reinitialise a chaque deploiement)
-STATE_FILE = os.environ.get("STATE_FILE", "./posted.json")
-
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-
-# ---------------------------------------------------------------------------
-# FORMATAGE IMAGES AU FORMAT INSTAGRAM (4:5 portrait)
-# Les photos du site n'ont pas toutes le meme ratio. On les retravaille pour
-# qu'elles s'affichent correctement sur Instagram, SANS jamais couper le
-# produit ni le deformer : l'image complete est centree sur un fond flou
-# genere a partir d'elle-meme. Les images formatees sont servies par un
-# petit serveur web integre a ce meme service Railway (public si un domaine
-# est genere dans Railway > Networking > Generate Domain).
-# ---------------------------------------------------------------------------
-STATIC_DIR      = os.environ.get("STATIC_DIR", "./static_images")
-PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
-PORT            = int(os.environ.get("PORT", "8080"))
-TARGET_W, TARGET_H = 1080, 1350  # format 4:5, recommande par Instagram
-
-os.makedirs(STATIC_DIR, exist_ok=True)
-
-flask_app = Flask(__name__)
-
-
-@flask_app.route("/img/<path:filename>")
-def serve_image(filename):
-    return send_from_directory(STATIC_DIR, filename)
-
-
-def run_web_server():
-    flask_app.run(host="0.0.0.0", port=PORT)
-
-
-def format_image_for_instagram(image_url, filename):
-    """Telecharge une image, la recadre au format Instagram (4:5) sans
-    deformation ni coupe du produit, avec un fond flou en remplissage.
-    Sauvegarde localement et retourne l'URL publique."""
+def crop_to_45(image_bytes):
+    """Recadre une image au format 4:5 (1080x1350) sans bandes blanches"""
     try:
-        r = requests.get(image_url, headers=HEADERS, timeout=15)
-        r.raise_for_status()
-        img = Image.open(BytesIO(r.content)).convert("RGB")
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        w, h = img.size
+        target_ratio = 4 / 5
+        current_ratio = w / h
 
-        # Fond : l'image agrandie pour couvrir tout le cadre, puis floutee
-        bg_ratio = max(TARGET_W / img.width, TARGET_H / img.height)
-        bg = img.resize((int(img.width * bg_ratio) + 1, int(img.height * bg_ratio) + 1))
-        left = (bg.width - TARGET_W) // 2
-        top = (bg.height - TARGET_H) // 2
-        bg = bg.crop((left, top, left + TARGET_W, top + TARGET_H))
-        bg = bg.filter(ImageFilter.GaussianBlur(40))
+        if current_ratio > target_ratio:
+            # Image trop large : coupe les cotés
+            new_w = int(h * target_ratio)
+            left = (w - new_w) // 2
+            img = img.crop((left, 0, left + new_w, h))
+        elif current_ratio < target_ratio:
+            # Image trop haute : coupe le haut et bas
+            new_h = int(w / target_ratio)
+            top = (h - new_h) // 2
+            img = img.crop((0, top, w, top + new_h))
 
-        # Premier plan : l'image entiere, redimensionnee sans deformation ni coupe
-        fg_ratio = min(TARGET_W / img.width, TARGET_H / img.height)
-        fg = img.resize((max(1, int(img.width * fg_ratio)), max(1, int(img.height * fg_ratio))))
-        fg_x = (TARGET_W - fg.width) // 2
-        fg_y = (TARGET_H - fg.height) // 2
-        bg.paste(fg, (fg_x, fg_y))
+        # Redimensionne en 1080x1350
+        img = img.resize((1080, 1350), Image.LANCZOS)
 
-        path = os.path.join(STATIC_DIR, filename)
-        bg.save(path, "JPEG", quality=90)
-
-        if not PUBLIC_BASE_URL:
-            print("PUBLIC_BASE_URL non configure : impossible de generer une URL publique")
-            return None
-        return f"{PUBLIC_BASE_URL}/img/{filename}"
+        output = io.BytesIO()
+        img.save(output, format="JPEG", quality=92)
+        return output.getvalue()
     except Exception as e:
-        print(f"Erreur formatage image {image_url}: {e}")
-        return None
+        print(f"Erreur recadrage: {e}")
+        return image_bytes
 
-# ---------------------------------------------------------------------------
-# MARQUES PRIORITAIRES
-# Le bot ne publie plus le "dernier produit" toutes marques confondues :
-# il tourne exclusivement sur ces 5 marques, une a une, sans jamais en
-# sortir, meme quand tout le stock de ces marques a deja ete publie
-# (dans ce cas, un nouveau cycle redemarre sur ces memes 5 marques).
-# ---------------------------------------------------------------------------
-BRANDS = {
-    "richmond-interiors": "66-richmond-interiors",
-    "sompex":              "15-sompex",
-    "socadis":             "55-socadis",
-    "villeroy-boch":       "62-villeroy-boch",
-    "kare-design":         "7-kare-design",
-}
-
-
-# ------------------------------------------------------------- historique --
-
-def load_state():
+def upload_to_imgbb(image_bytes):
+    """Upload une image sur imgbb et retourne l'URL publique"""
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {"posted_urls": []}
-
-
-def save_state(state):
-    try:
-        os.makedirs(os.path.dirname(STATE_FILE) or ".", exist_ok=True)
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"Erreur sauvegarde historique: {e}")
-
-
-# ------------------------------------------------------- scraping marques --
-
-# Motif d'URL produit du site, ex:
-# https://www.loftattitude.com/fr/chaise/16626-chaise-de-salle-a-manger-oasis-naturel-gwen-8721009431849.html
-# Independant des classes CSS (contrairement a .product-miniature qui a change
-# de structure sur les pages marque et renvoyait 0 resultat).
-PRODUCT_URL_PATTERN = re.compile(
-    r"https://www\.loftattitude\.com/fr/[a-z0-9\-]+/\d+-[a-z0-9\-]+\.html"
-)
-
-
-def scrape_brand_products(brand_slug):
-    """Recupere les URLs produits de la 1ere page d'une marque (24 produits).
-    Extraction par motif d'URL, insensible aux changements de classes CSS."""
-    url = f"https://www.loftattitude.com/fr/brand/{brand_slug}"
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=20)
-        urls = sorted(set(PRODUCT_URL_PATTERN.findall(r.text)))
-        print(f"Marque {brand_slug}: {len(urls)} produits trouves")
-        return urls
-    except Exception as e:
-        print(f"Erreur scraping marque {brand_slug}: {e}")
-        return []
-
-
-def get_product_details(product_url):
-    """Recupere nom, prix et image principale d'une fiche produit via les
-    balises meta (og:title, product:price:amount, og:image), plus fiables
-    que les classes CSS qui varient selon les templates de page."""
-    try:
-        r = requests.get(product_url, headers=HEADERS, timeout=15)
-        html = r.text
-
-        nom_match = re.search(r'property="og:title"\s+content="([^"]+)"', html)
-        nom = nom_match.group(1).strip() if nom_match else "Nouveau produit design"
-        for suffix in [" | Loft Attitude", " - Loft Attitude"]:
-            if nom.endswith(suffix):
-                nom = nom[: -len(suffix)]
-
-        price_match = re.search(r'property="product:price:amount"\s+content="([\d.,]+)"', html)
-        prix = f"{price_match.group(1)} €" if price_match else ""
-
-        img_match = re.search(r'property="og:image"\s+content="([^"]+)"', html)
-        image_url = img_match.group(1) if img_match else ""
-
-        return {"nom": nom, "prix": prix, "image_url": image_url, "url": product_url}
-    except Exception as e:
-        print(f"Erreur recuperation details produit: {e}")
-        return {"nom": "Nouveau produit design", "prix": "", "image_url": "", "url": product_url}
-
-
-def get_next_priority_product(state):
-    """Choisit le prochain produit a publier EXCLUSIVEMENT parmi les 5
-    marques prioritaires, en les faisant tourner une a une."""
-    posted = set(state.get("posted_urls", []))
-    brand_names = list(BRANDS.keys())
-
-    def try_pick(exclude_urls):
-        start = len(posted) % len(brand_names)
-        ordered = brand_names[start:] + brand_names[:start]
-        for brand in ordered:
-            print(f"Recherche produit disponible sur la marque '{brand}'...")
-            urls = scrape_brand_products(BRANDS[brand])
-            candidates = [u for u in urls if u not in exclude_urls]
-            if candidates:
-                choice = random.choice(candidates)
-                print(f"Produit retenu ({brand}): {choice}")
-                return get_product_details(choice)
-        return None
-
-    product = try_pick(posted)
-    if product:
-        return product
-
-    # Les 5 marques sont epuisees (tout a deja ete publie au moins une fois) :
-    # on relance un cycle sur ces memes marques, sans jamais sortir du perimetre
-    print("Toutes les marques prioritaires ont ete publiees au moins une fois. Nouveau cycle.")
-    all_brand_urls = set()
-    for slug in BRANDS.values():
-        all_brand_urls.update(scrape_brand_products(slug))
-    posted_outside_brands = posted - all_brand_urls
-    return try_pick(posted_outside_brands)
-
-
-# ------------------------------------------------------------------- bio --
-
-def update_bio_link(product_url, product_name):
-    """Met a jour le lien de la bio Instagram avec l'URL du produit"""
-    try:
-        bio_text = f"🛋️ Meubles & Objets Design | Style Loft & Industriel\n✨ Nouveau : {product_name[:40]}\n👇 Produit du jour"
-        r = requests.post(f"{IG_BASE}/{IG_USER_ID}", data={
-            "biography":    bio_text,
-            "website":      product_url,
-            "access_token": IG_TOKEN,
+        img_b64 = base64.b64encode(image_bytes).decode("utf-8")
+        r = requests.post("https://api.imgbb.com/1/upload", data={
+            "key":        IMGBB_KEY,
+            "image":      img_b64,
+            "expiration": 3600,  # expire apres 1 heure
         })
         result = r.json()
-        if "id" in result or "biography" in result:
-            print(f"Bio mise a jour avec le lien : {product_url}")
-            return True
+        if result.get("success"):
+            url = result["data"]["url"]
+            print(f"Image uploadee: {url}")
+            return url
         else:
-            print(f"Erreur mise a jour bio: {result}")
-            return False
+            print(f"Erreur imgbb: {result}")
+            return None
     except Exception as e:
-        print(f"Erreur bio: {e}")
-        return False
+        print(f"Erreur upload imgbb: {e}")
+        return None
 
-
-# ---------------------------------------------------------------- images --
+def process_image(image_url):
+    """Telecharge, recadre en 4:5 et uploade sur imgbb"""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(image_url, headers=headers, timeout=15)
+        if r.status_code != 200:
+            return None
+        cropped = crop_to_45(r.content)
+        public_url = upload_to_imgbb(cropped)
+        return public_url
+    except Exception as e:
+        print(f"Erreur traitement image: {e}")
+        return None
 
 def get_product_images(product_url):
     """Scrape toutes les images d'une fiche produit"""
     try:
-        r = requests.get(product_url, headers=HEADERS, timeout=15)
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        r = requests.get(product_url, headers=headers, timeout=15)
         soup = BeautifulSoup(r.text, "html.parser")
         images = []
         selectors = [
-            ".product-images img",
-            ".product-cover img",
-            ".product-thumbs img",
-            "#product-images-large img",
-            ".slick-slide img",
-            ".owl-item img",
-            "[data-image-large-src]",
-            ".js-qv-product-cover img",
-            ".product-image img",
+            ".product-images img", ".product-cover img", ".product-thumbs img",
+            "#product-images-large img", ".slick-slide img", ".owl-item img",
+            "[data-image-large-src]", ".js-qv-product-cover img", ".product-image img",
         ]
         seen = set()
         for sel in selectors:
@@ -256,7 +104,6 @@ def get_product_images(product_url):
     except Exception as e:
         print(f"Erreur scraping images: {e}")
         return []
-
 
 def is_lifestyle_image(image_url):
     """Detecte si une image est lifestyle via Claude Vision"""
@@ -284,7 +131,6 @@ def is_lifestyle_image(image_url):
         print(f"Erreur analyse image: {e}")
         return False, 0
 
-
 def select_best_images(images, max_images=5):
     """Selectionne les meilleures images en prioritisant le lifestyle"""
     if not images:
@@ -303,8 +149,34 @@ def select_best_images(images, max_images=5):
     print(f"Selection: {len(best)} images ({lifestyle_count} lifestyle)")
     return best
 
-
-# --------------------------------------------------------------- caption --
+def get_latest_product():
+    """Recupere le dernier produit depuis loftattitude.com"""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        r = requests.get("https://www.loftattitude.com/fr/nouveaux-produits", headers=headers, timeout=15)
+        soup = BeautifulSoup(r.text, "html.parser")
+        product = soup.select_one(".product-miniature")
+        if not product:
+            print("Aucun produit trouve")
+            return None
+        name_el  = product.select_one(".product-title")
+        price_el = product.select_one(".price")
+        img_el   = product.select_one("img")
+        link_el  = product.select_one("a")
+        img_url = img_el.get("data-src") or img_el.get("src") if img_el else ""
+        if img_url and img_url.startswith("/"):
+            img_url = "https://www.loftattitude.com" + img_url
+        href = link_el.get("href", "") if link_el else ""
+        product_url = href if href.startswith("http") else "https://www.loftattitude.com" + href
+        return {
+            "nom":       name_el.text.strip()  if name_el  else "Nouveau produit design",
+            "prix":      price_el.text.strip() if price_el else "",
+            "image_url": img_url,
+            "url":       product_url or "https://www.loftattitude.com",
+        }
+    except Exception as e:
+        print(f"Erreur scraping produit: {e}")
+        return None
 
 def generate_caption(product):
     """Genere caption + hashtags avec Claude"""
@@ -322,28 +194,35 @@ def generate_caption(product):
         print(f"Erreur caption: {e}")
         return f"Nouvelle arrivee chez Loft Attitude ! {product['nom']} - {product['prix']}\nRetrouvez ce produit via le lien en bio 👆 loftattitude.com\n\n#loftattitude #design #deco #meuble #loftdesign"
 
-
-# ------------------------------------------------------------ publication --
-
-def publish_carousel(images, caption):
-    """Publie un carrousel ou image simple"""
-    if not images:
-        print("Pas d'images")
+def publish_instagram(images_urls, caption):
+    """Publie sur Instagram (simple ou carrousel)"""
+    if not images_urls or not IG_TOKEN:
         return False
-    if not IG_TOKEN:
-        print("Token manquant")
-        return False
-    if len(images) == 1:
-        return publish_single(images[0], caption)
 
-    print(f"Carrousel avec {len(images)} images...")
+    if len(images_urls) == 1:
+        r1 = requests.post(f"{IG_BASE}/{IG_USER_ID}/media", data={
+            "image_url": images_urls[0], "caption": caption, "access_token": IG_TOKEN,
+        })
+        result1 = r1.json()
+        if "id" not in result1:
+            print(f"Erreur Instagram: {result1}")
+            return False
+        time.sleep(30)
+        r2 = requests.post(f"{IG_BASE}/{IG_USER_ID}/media_publish", data={
+            "creation_id": result1["id"], "access_token": IG_TOKEN,
+        })
+        result2 = r2.json()
+        if "id" in result2:
+            print(f"Instagram OK ! ID: {result2['id']}")
+            return True
+        return False
+
+    # Carrousel
     children_ids = []
-    for i, img_url in enumerate(images):
-        print(f"  Container image {i+1}...")
+    for i, img_url in enumerate(images_urls):
+        print(f"  Container Instagram {i+1}...")
         r = requests.post(f"{IG_BASE}/{IG_USER_ID}/media", data={
-            "image_url":        img_url,
-            "is_carousel_item": "true",
-            "access_token":     IG_TOKEN,
+            "image_url": img_url, "is_carousel_item": "true", "access_token": IG_TOKEN,
         })
         result = r.json()
         if "id" in result:
@@ -354,57 +233,76 @@ def publish_carousel(images, caption):
     if not children_ids:
         return False
 
-    print(f"{len(children_ids)} containers crees. Attente 30s...")
+    print(f"{len(children_ids)} containers. Attente 30s...")
     time.sleep(30)
 
     r2 = requests.post(f"{IG_BASE}/{IG_USER_ID}/media", data={
-        "media_type":   "CAROUSEL",
-        "children":     ",".join(children_ids),
-        "caption":      caption,
-        "access_token": IG_TOKEN,
+        "media_type": "CAROUSEL", "children": ",".join(children_ids),
+        "caption": caption, "access_token": IG_TOKEN,
     })
     result2 = r2.json()
-    print(f"Container carrousel: {result2}")
     if "id" not in result2:
+        print(f"Erreur carrousel: {result2}")
         return False
 
     time.sleep(10)
     r3 = requests.post(f"{IG_BASE}/{IG_USER_ID}/media_publish", data={
-        "creation_id":  result2["id"],
-        "access_token": IG_TOKEN,
+        "creation_id": result2["id"], "access_token": IG_TOKEN,
     })
     result3 = r3.json()
     if "id" in result3:
-        print(f"Carrousel publie ! ID: {result3['id']}")
+        print(f"Instagram carrousel OK ! ID: {result3['id']}")
         return True
-    print(f"Erreur: {result3}")
+    print(f"Erreur publication: {result3}")
     return False
 
-
-def publish_single(image_url, caption):
-    """Publie une image simple"""
-    r1 = requests.post(f"{IG_BASE}/{IG_USER_ID}/media", data={
-        "image_url":    image_url,
-        "caption":      caption,
-        "access_token": IG_TOKEN,
-    })
-    result1 = r1.json()
-    if "id" not in result1:
-        print(f"Erreur: {result1}")
+def publish_facebook(images_urls, caption, product_url):
+    """Publie sur la Page Facebook"""
+    if not FB_PAGE_ID or not FB_TOKEN:
+        print("Facebook non configure - ignore")
         return False
-    time.sleep(30)
-    r2 = requests.post(f"{IG_BASE}/{IG_USER_ID}/media_publish", data={
-        "creation_id":  result1["id"],
-        "access_token": IG_TOKEN,
-    })
-    result2 = r2.json()
-    if "id" in result2:
-        print(f"Publie ! ID: {result2['id']}")
-        return True
-    return False
+    try:
+        print("Publication Facebook...")
+        if len(images_urls) == 1:
+            r = requests.post(f"{FB_BASE}/{FB_PAGE_ID}/photos", data={
+                "url": images_urls[0],
+                "caption": caption + f"\n\n🔗 {product_url}",
+                "access_token": FB_TOKEN,
+            })
+            result = r.json()
+            if "id" in result:
+                print(f"Facebook OK ! ID: {result['id']}")
+                return True
+            print(f"Erreur Facebook: {result}")
+            return False
 
+        photo_ids = []
+        for i, img_url in enumerate(images_urls):
+            print(f"  Upload Facebook photo {i+1}...")
+            r = requests.post(f"{FB_BASE}/{FB_PAGE_ID}/photos", data={
+                "url": img_url, "published": "false", "access_token": FB_TOKEN,
+            })
+            result = r.json()
+            if "id" in result:
+                photo_ids.append({"media_fbid": result["id"]})
 
-# ------------------------------------------------------------------- job --
+        if not photo_ids:
+            return False
+
+        r2 = requests.post(f"{FB_BASE}/{FB_PAGE_ID}/feed", data={
+            "message": caption + f"\n\n🔗 {product_url}",
+            "attached_media": json.dumps(photo_ids),
+            "access_token": FB_TOKEN,
+        })
+        result2 = r2.json()
+        if "id" in result2:
+            print(f"Facebook OK avec {len(photo_ids)} photos ! ID: {result2['id']}")
+            return True
+        print(f"Erreur Facebook: {result2}")
+        return False
+    except Exception as e:
+        print(f"Erreur Facebook: {e}")
+        return False
 
 def daily_job():
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -412,68 +310,67 @@ def daily_job():
     print(f"[{now}] Debut publication Loft Attitude")
     print(f"{'='*50}")
 
-    state = load_state()
-
-    # 1. Produit (exclusivement parmi les 5 marques prioritaires)
-    product = get_next_priority_product(state)
+    # 1. Produit
+    product = get_latest_product()
     if not product:
-        print("Pas de produit disponible dans les marques prioritaires.")
+        print("Pas de produit.")
         return
     print(f"Produit: {product['nom']}")
     print(f"URL: {product['url']}")
 
-    # 2. Mise a jour de la bio avec le lien produit
-    print("Mise a jour de la bio Instagram...")
-    update_bio_link(product["url"], product["nom"])
-
-    # 3. Images
+    # 2. Images brutes
     all_images = get_product_images(product["url"]) if product["url"] else []
     if not all_images and product["image_url"]:
         all_images = [product["image_url"]]
 
-    # 4. Selection lifestyle
+    # 3. Selection lifestyle par IA
     best_images = select_best_images(all_images, max_images=5)
     if not best_images:
         print("Pas d'images.")
         return
 
-    # 4bis. Formatage au format Instagram (4:5, sans coupe ni deformation)
-    print("Formatage des images au format Instagram...")
-    formatted_images = []
+    # 4. Recadrage 4:5 + upload imgbb
+    print("\nRecadrage 4:5 et upload des images...")
+    processed_urls = []
     for i, img_url in enumerate(best_images):
-        filename = f"{int(time.time())}_{i}.jpg"
-        public_url = format_image_for_instagram(img_url, filename)
+        print(f"  Traitement image {i+1}...")
+        public_url = process_image(img_url)
         if public_url:
-            formatted_images.append(public_url)
-    if not formatted_images:
-        print("Echec du formatage des images, publication annulee.")
+            processed_urls.append(public_url)
+        else:
+            processed_urls.append(img_url)  # fallback sur original
+
+    if not processed_urls:
+        print("Pas d'images traitees.")
         return
+
+    print(f"{len(processed_urls)} images pretes (format 4:5, sans bandes blanches)")
 
     # 5. Caption
     caption = generate_caption(product)
     print(f"Caption: {len(caption)} caracteres")
 
-    # 6. Publication
-    success = publish_carousel(formatted_images, caption)
-    print("Reussi !" if success else "Echec.")
+    # 6. Publication Instagram
+    print("\n--- INSTAGRAM ---")
+    ig_ok = publish_instagram(processed_urls, caption)
+    print("Instagram: OK" if ig_ok else "Instagram: ECHEC")
 
-    # 7. Historique (uniquement si succes, pour reessayer ce produit sinon)
-    if success:
-        state.setdefault("posted_urls", []).append(product["url"])
-        save_state(state)
+    # 7. Publication Facebook
+    print("\n--- FACEBOOK ---")
+    fb_ok = publish_facebook(processed_urls, caption, product["url"])
+    print("Facebook: OK" if fb_ok else "Facebook: ECHEC ou non configure")
 
+    print(f"\nResultat final: Instagram={'OK' if ig_ok else 'ECHEC'} | Facebook={'OK' if fb_ok else 'ECHEC'}")
 
 if __name__ == "__main__":
-    print("Bot Loft Attitude v4 - Marques prioritaires + Lifestyle + Carrousel + Bio + Formatage Instagram")
-    print(f"IG_USER_ID: {IG_USER_ID}")
-    print(f"Token: {'OK' if IG_TOKEN else 'MANQUANT'}")
-    print(f"Claude: {'OK' if CLAUDE_KEY else 'MANQUANT'}")
-    print(f"Marques prioritaires: {', '.join(BRANDS.keys())}")
-    print(f"URL publique images: {PUBLIC_BASE_URL if PUBLIC_BASE_URL else 'NON CONFIGUREE (a definir dans Railway)'}")
+    print("Bot Loft Attitude FINAL - 4:5 + Lifestyle + Carrousel + IG + FB")
+    print(f"IG_USER_ID:  {IG_USER_ID}")
+    print(f"IMGBB:       {'OK' if IMGBB_KEY else 'MANQUANT'}")
+    print(f"FB_PAGE_ID:  {FB_PAGE_ID or 'non configure'}")
+    print(f"Token IG:    {'OK' if IG_TOKEN else 'MANQUANT'}")
+    print(f"Token FB:    {'OK' if FB_TOKEN else 'non configure'}")
+    print(f"Claude:      {'OK' if CLAUDE_KEY else 'MANQUANT'}")
     print("Publication planifiee a 09:00\n")
-
-    threading.Thread(target=run_web_server, daemon=True).start()
-
     daily_job()
     schedule.every().day.at("09:00").do(daily_job)
     while True:
