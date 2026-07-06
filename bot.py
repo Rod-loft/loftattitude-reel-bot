@@ -1,7 +1,8 @@
 import os, time, requests, schedule, anthropic, json, base64, io
+import numpy as np
 from datetime import datetime
 from bs4 import BeautifulSoup
-from PIL import Image, ImageEnhance
+from PIL import Image
 
 IG_USER_ID   = os.environ.get("IG_USER_ID", "17841400937343787")
 IG_TOKEN     = os.environ.get("IG_ACCESS_TOKEN", "")
@@ -40,39 +41,70 @@ def mark_as_published(product_url):
 
 # ─── TRAITEMENT IMAGE ─────────────────────────────────────────────────────────
 
+def trim_white_borders(img, threshold=238):
+    """
+    Detecte et supprime les bandes blanches/claires
+    qui sont integrees dans l'image elle-meme.
+    threshold: pixels plus clairs que ca sont consideres blancs
+    """
+    try:
+        arr = np.array(img.convert("L"))
+        mask = arr < threshold
+        rows = np.any(mask, axis=1)
+        cols = np.any(mask, axis=0)
+        if not rows.any() or not cols.any():
+            return img
+        pad = 8
+        top    = max(0, int(np.argmax(rows)) - pad)
+        bottom = min(img.height, int(len(rows) - np.argmax(rows[::-1])) + pad)
+        left   = max(0, int(np.argmax(cols)) - pad)
+        right  = min(img.width, int(len(cols) - np.argmax(cols[::-1])) + pad)
+        bandes_h = top + (img.height - bottom)
+        bandes_v = left + (img.width - right)
+        if bandes_h > 10 or bandes_v > 10:
+            print(f"  Bandes blanches detectees et supprimees (haut:{top} bas:{img.height-bottom} gauche:{left} droite:{img.width-right})")
+        return img.crop((left, top, right, bottom))
+    except Exception as e:
+        print(f"  Erreur trim: {e}")
+        return img
+
 def crop_to_45(image_bytes):
     """
-    Recadre TOUJOURS en 4:5 (1080x1350) en zoomant/coupant au centre.
-    ZERO bande blanche — l'image remplit toujours tout le cadre.
+    1. Supprime les bandes blanches integrees
+    2. Recadre en 4:5 (1080x1350) par zoom/coupe au centre
+    Resultat : image plein cadre, zero bande blanche
     """
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        print(f"  Taille originale: {img.size}")
+
+        # ETAPE 1 : Supprimer les bandes blanches integrees dans l'image
+        img = trim_white_borders(img)
+        print(f"  Taille apres rognage: {img.size}")
+
+        # ETAPE 2 : Recadrer en 4:5 plein cadre
         w, h = img.size
         target_w, target_h = 1080, 1350
         target_ratio = target_w / target_h  # 0.8
         src_ratio = w / h
 
         if src_ratio > target_ratio:
-            # Image plus large que 4:5 (ex: paysage 16:9)
-            # → on redimensionne par la hauteur et on coupe les côtés
+            # Image plus large : redimensionne par hauteur, coupe les cotes
             new_h = target_h
             new_w = int(new_h * src_ratio)
             img_resized = img.resize((new_w, new_h), Image.LANCZOS)
-            # Coupe au centre
             left = (new_w - target_w) // 2
-            img_cropped = img_resized.crop((left, 0, left + target_w, target_h))
+            img_final = img_resized.crop((left, 0, left + target_w, target_h))
         else:
-            # Image plus haute que 4:5 (ex: portrait, carré)
-            # → on redimensionne par la largeur et on coupe haut/bas
+            # Image plus haute ou carree : redimensionne par largeur, coupe haut/bas
             new_w = target_w
             new_h = int(new_w / src_ratio)
             img_resized = img.resize((new_w, new_h), Image.LANCZOS)
-            # Coupe au centre
-            top = (new_h - target_h) // 2
-            img_cropped = img_resized.crop((0, top, target_w, top + target_h))
+            top = max(0, (new_h - target_h) // 2)
+            img_final = img_resized.crop((0, top, target_w, top + target_h))
 
         output = io.BytesIO()
-        img_cropped.save(output, format="JPEG", quality=92)
+        img_final.save(output, format="JPEG", quality=92)
         return output.getvalue()
 
     except Exception as e:
@@ -88,12 +120,12 @@ def upload_to_imgbb(image_bytes):
         result = r.json()
         if result.get("success"):
             url = result["data"]["url"]
-            print(f"Image uploadee: {url}")
+            print(f"  Uploadee: {url}")
             return url
-        print(f"Erreur imgbb: {result}")
+        print(f"  Erreur imgbb: {result}")
         return None
     except Exception as e:
-        print(f"Erreur upload imgbb: {e}")
+        print(f"  Erreur upload: {e}")
         return None
 
 def process_image(image_url):
@@ -103,7 +135,7 @@ def process_image(image_url):
             return None
         return upload_to_imgbb(crop_to_45(r.content))
     except Exception as e:
-        print(f"Erreur traitement image: {e}")
+        print(f"Erreur traitement: {e}")
         return None
 
 # ─── SCRAPING ─────────────────────────────────────────────────────────────────
@@ -296,7 +328,6 @@ def publish_facebook(images_urls, caption, product_url):
         return False
     try:
         print(f"Publication Facebook sur {FB_PAGE_ID}...")
-        # Recupere le token de Page automatiquement
         r_pages = requests.get(f"{FB_BASE}/me/accounts", params={"access_token": IG_TOKEN})
         pages = r_pages.json().get("data", [])
         page_token = None
@@ -308,7 +339,6 @@ def publish_facebook(images_urls, caption, product_url):
         if not page_token:
             print(f"Token Page non trouve. Pages: {[p.get('name') for p in pages]}")
             return False
-
         if len(images_urls) == 1:
             r = requests.post(f"{FB_BASE}/{FB_PAGE_ID}/photos", data={
                 "url": images_urls[0],
@@ -321,7 +351,6 @@ def publish_facebook(images_urls, caption, product_url):
                 return True
             print(f"Erreur Facebook: {result}")
             return False
-
         photo_ids = []
         for i, img_url in enumerate(images_urls):
             print(f"  Upload Facebook photo {i+1}...")
@@ -331,8 +360,6 @@ def publish_facebook(images_urls, caption, product_url):
             result = r.json()
             if "id" in result:
                 photo_ids.append({"media_fbid": result["id"]})
-            else:
-                print(f"  Erreur: {result}")
         if not photo_ids:
             return False
         r2 = requests.post(f"{FB_BASE}/{FB_PAGE_ID}/feed", data={
@@ -357,54 +384,43 @@ def daily_job():
     print(f"\n{'='*50}")
     print(f"[{now}] Debut publication Loft Attitude")
     print(f"{'='*50}")
-
     product = get_next_product()
     if not product:
         print("Pas de nouveau produit aujourd'hui.")
         return
     print(f"Produit: {product['nom']} | Prix: {product['prix']}")
-
     all_images = get_product_images(product["url"]) if product["url"] else []
     if not all_images and product["image_url"]:
         all_images = [product["image_url"]]
-
     best_images = select_best_images(all_images, max_images=5)
     if not best_images:
         print("Pas d'images.")
         return
-
-    print("\nRecadrage 4:5 (zoom centre, zero bande) + upload...")
+    print("\nSuppression bandes blanches + recadrage 4:5 + upload...")
     processed_urls = []
     for i, img_url in enumerate(best_images):
-        print(f"  Traitement image {i+1}...")
+        print(f"  Image {i+1}: {img_url}")
         public_url = process_image(img_url)
         processed_urls.append(public_url if public_url else img_url)
-
     if not processed_urls:
         return
-
-    print(f"{len(processed_urls)} images pretes (4:5 plein cadre)")
-
+    print(f"{len(processed_urls)} images pretes")
     caption = generate_caption(product)
     print(f"Caption: {len(caption)} caracteres")
-
     print("\n--- INSTAGRAM ---")
     ig_ok = publish_instagram(processed_urls, caption)
     print("Instagram: OK" if ig_ok else "Instagram: ECHEC")
-
     print("\n--- FACEBOOK ---")
     fb_ok = publish_facebook(processed_urls, caption, product["url"])
     print("Facebook: OK" if fb_ok else "Facebook: ECHEC")
-
     if ig_ok:
         mark_as_published(product["url"])
-
     print(f"\nResultat: Instagram={'OK' if ig_ok else 'ECHEC'} | Facebook={'OK' if fb_ok else 'ECHEC'}")
 
 # ─── LANCEMENT ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print("Bot Loft Attitude v8 - Zoom centre (zero bande) + FB auto token")
+    print("Bot Loft Attitude v9 - Suppression bandes blanches integrees + 4:5 plein cadre")
     print(f"IG_USER_ID:  {IG_USER_ID}")
     print(f"FB_PAGE_ID:  {FB_PAGE_ID}")
     print(f"IMGBB:       {'OK' if IMGBB_KEY else 'MANQUANT'}")
