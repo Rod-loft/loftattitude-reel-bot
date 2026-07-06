@@ -42,11 +42,7 @@ def mark_as_published(product_url):
 # ─── TRAITEMENT IMAGE ─────────────────────────────────────────────────────────
 
 def trim_white_borders(img, threshold=238):
-    """
-    Detecte et supprime les bandes blanches/claires
-    qui sont integrees dans l'image elle-meme.
-    threshold: pixels plus clairs que ca sont consideres blancs
-    """
+    """Supprime les bandes blanches integrees dans l'image"""
     try:
         arr = np.array(img.convert("L"))
         mask = arr < threshold
@@ -59,49 +55,75 @@ def trim_white_borders(img, threshold=238):
         bottom = min(img.height, int(len(rows) - np.argmax(rows[::-1])) + pad)
         left   = max(0, int(np.argmax(cols)) - pad)
         right  = min(img.width, int(len(cols) - np.argmax(cols[::-1])) + pad)
-        bandes_h = top + (img.height - bottom)
-        bandes_v = left + (img.width - right)
-        if bandes_h > 10 or bandes_v > 10:
-            print(f"  Bandes blanches detectees et supprimees (haut:{top} bas:{img.height-bottom} gauche:{left} droite:{img.width-right})")
+        if (top + img.height - bottom) > 10 or (left + img.width - right) > 10:
+            print(f"  Bandes supprimees (h:{top}+{img.height-bottom} v:{left}+{img.width-right})")
         return img.crop((left, top, right, bottom))
     except Exception as e:
         print(f"  Erreur trim: {e}")
         return img
 
+def is_white_background(img, threshold=240, min_ratio=0.25):
+    """Detecte si l'image a un fond blanc (produit detouré)"""
+    try:
+        arr = np.array(img.convert("L"))
+        white_pixels = np.sum(arr >= threshold)
+        ratio = white_pixels / arr.size
+        return ratio > min_ratio
+    except:
+        return False
+
 def crop_to_45(image_bytes):
     """
-    1. Supprime les bandes blanches integrees
-    2. Recadre en 4:5 (1080x1350) par zoom/coupe au centre
-    Resultat : image plein cadre, zero bande blanche
+    Recadre intelligemment en 4:5 (1080x1350) :
+    - Lifestyle (fond colore) → zoom plein cadre, aucune bande
+    - Detouré (fond blanc)   → produit ENTIER centre, fond blanc propre
     """
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         print(f"  Taille originale: {img.size}")
 
-        # ETAPE 1 : Supprimer les bandes blanches integrees dans l'image
+        # Supprime les bandes blanches integrees
         img = trim_white_borders(img)
-        print(f"  Taille apres rognage: {img.size}")
+        print(f"  Apres rognage: {img.size}")
 
-        # ETAPE 2 : Recadrer en 4:5 plein cadre
-        w, h = img.size
         target_w, target_h = 1080, 1350
-        target_ratio = target_w / target_h  # 0.8
+        target_ratio = target_w / target_h
+        w, h = img.size
         src_ratio = w / h
 
-        if src_ratio > target_ratio:
-            # Image plus large : redimensionne par hauteur, coupe les cotes
-            new_h = target_h
-            new_w = int(new_h * src_ratio)
+        fond_blanc = is_white_background(img)
+        print(f"  Fond blanc: {fond_blanc}")
+
+        if fond_blanc:
+            # Produit detouré : entier, centre, fond blanc, avec marge
+            canvas = Image.new("RGB", (target_w, target_h), (255, 255, 255))
+            margin = 80
+            max_w = target_w - margin * 2
+            max_h = target_h - margin * 2
+            scale = min(max_w / w, max_h / h)
+            new_w = int(w * scale)
+            new_h = int(h * scale)
             img_resized = img.resize((new_w, new_h), Image.LANCZOS)
-            left = (new_w - target_w) // 2
-            img_final = img_resized.crop((left, 0, left + target_w, target_h))
+            x = (target_w - new_w) // 2
+            y = (target_h - new_h) // 2
+            canvas.paste(img_resized, (x, y))
+            img_final = canvas
+            print(f"  → Produit entier sur fond blanc ({new_w}x{new_h})")
         else:
-            # Image plus haute ou carree : redimensionne par largeur, coupe haut/bas
-            new_w = target_w
-            new_h = int(new_w / src_ratio)
-            img_resized = img.resize((new_w, new_h), Image.LANCZOS)
-            top = max(0, (new_h - target_h) // 2)
-            img_final = img_resized.crop((0, top, target_w, top + target_h))
+            # Lifestyle : zoom/coupe plein cadre
+            if src_ratio > target_ratio:
+                new_h = target_h
+                new_w = int(new_h * src_ratio)
+                img_r = img.resize((new_w, new_h), Image.LANCZOS)
+                left = (new_w - target_w) // 2
+                img_final = img_r.crop((left, 0, left + target_w, target_h))
+            else:
+                new_w = target_w
+                new_h = int(new_w / src_ratio)
+                img_r = img.resize((new_w, new_h), Image.LANCZOS)
+                top = max(0, (new_h - target_h) // 2)
+                img_final = img_r.crop((0, top, target_w, top + target_h))
+            print(f"  → Lifestyle plein cadre")
 
         output = io.BytesIO()
         img_final.save(output, format="JPEG", quality=92)
@@ -248,8 +270,6 @@ def get_next_product():
         print(f"Erreur scraping: {e}")
         return None
 
-# ─── CAPTION ──────────────────────────────────────────────────────────────────
-
 def generate_caption(product):
     try:
         client = anthropic.Anthropic(api_key=CLAUDE_KEY)
@@ -264,8 +284,6 @@ def generate_caption(product):
     except Exception as e:
         print(f"Erreur caption: {e}")
         return f"Nouvelle arrivee chez Loft Attitude ! {product['nom']} - {product['prix']}\nRetrouvez ce produit via le lien en bio 👆 loftattitude.com\n\n#loftattitude #design #deco #meuble #loftdesign"
-
-# ─── PUBLICATION ──────────────────────────────────────────────────────────────
 
 def publish_instagram(images_urls, caption):
     if not images_urls or not IG_TOKEN:
@@ -341,8 +359,7 @@ def publish_facebook(images_urls, caption, product_url):
             return False
         if len(images_urls) == 1:
             r = requests.post(f"{FB_BASE}/{FB_PAGE_ID}/photos", data={
-                "url": images_urls[0],
-                "caption": caption + f"\n\n🔗 {product_url}",
+                "url": images_urls[0], "caption": caption + f"\n\n🔗 {product_url}",
                 "access_token": page_token,
             })
             result = r.json()
@@ -369,15 +386,13 @@ def publish_facebook(images_urls, caption, product_url):
         })
         result2 = r2.json()
         if "id" in result2:
-            print(f"Facebook OK avec {len(photo_ids)} photos ! ID: {result2['id']}")
+            print(f"Facebook OK ! ID: {result2['id']}")
             return True
         print(f"Erreur Facebook: {result2}")
         return False
     except Exception as e:
         print(f"Erreur Facebook: {e}")
         return False
-
-# ─── JOB PRINCIPAL ────────────────────────────────────────────────────────────
 
 def daily_job():
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -396,10 +411,10 @@ def daily_job():
     if not best_images:
         print("Pas d'images.")
         return
-    print("\nSuppression bandes blanches + recadrage 4:5 + upload...")
+    print("\nTraitement images (smart crop 4:5)...")
     processed_urls = []
     for i, img_url in enumerate(best_images):
-        print(f"  Image {i+1}: {img_url}")
+        print(f"  Image {i+1}: {img_url[:60]}...")
         public_url = process_image(img_url)
         processed_urls.append(public_url if public_url else img_url)
     if not processed_urls:
@@ -417,10 +432,8 @@ def daily_job():
         mark_as_published(product["url"])
     print(f"\nResultat: Instagram={'OK' if ig_ok else 'ECHEC'} | Facebook={'OK' if fb_ok else 'ECHEC'}")
 
-# ─── LANCEMENT ────────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
-    print("Bot Loft Attitude v9 - Suppression bandes blanches integrees + 4:5 plein cadre")
+    print("Bot Loft Attitude v10 - Smart crop: lifestyle=plein cadre / detouré=produit entier")
     print(f"IG_USER_ID:  {IG_USER_ID}")
     print(f"FB_PAGE_ID:  {FB_PAGE_ID}")
     print(f"IMGBB:       {'OK' if IMGBB_KEY else 'MANQUANT'}")
