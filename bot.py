@@ -341,6 +341,21 @@ def publish_instagram(images_urls, caption):
     print(f"Erreur: {result3}")
     return False
 
+def build_facebook_caption(caption, product_url):
+    """
+    Facebook genere son apercu de lien a partir du PREMIER lien detecte dans
+    le texte. La caption Instagram se termine par la mention texte
+    "loftattitude.com" (pour le lien en bio), ce qui fait que Facebook
+    capte ce nom de domaine seul au lieu du vrai lien produit ajoute apres.
+    On retire cette mention pour ne laisser qu'un seul lien detectable :
+    celui du produit.
+    """
+    fb_caption = caption.replace(
+        "Retrouvez ce produit via le lien en bio 👆 loftattitude.com",
+        "Retrouvez ce produit juste ici 👇"
+    ).replace("loftattitude.com", "").rstrip()
+    return fb_caption + f"\n\n🔗 {product_url}"
+
 def publish_facebook(images_urls, caption, product_url):
     """
     Publie directement sur la Page Facebook en utilisant le FB_PAGE_TOKEN
@@ -352,11 +367,12 @@ def publish_facebook(images_urls, caption, product_url):
         return False
     try:
         print(f"Publication Facebook sur la Page {FB_PAGE_ID}...")
+        fb_caption = build_facebook_caption(caption, product_url)
 
         if len(images_urls) == 1:
             r = requests.post(f"{FB_BASE}/{FB_PAGE_ID}/photos", data={
                 "url": images_urls[0],
-                "caption": caption + f"\n\n🔗 {product_url}",
+                "caption": fb_caption,
                 "access_token": FB_PAGE_TOKEN,
             })
             result = r.json()
@@ -382,7 +398,7 @@ def publish_facebook(images_urls, caption, product_url):
             return False
 
         r2 = requests.post(f"{FB_BASE}/{FB_PAGE_ID}/feed", data={
-            "message": caption + f"\n\n🔗 {product_url}",
+            "message": fb_caption,
             "attached_media": json.dumps(photo_ids),
             "access_token": FB_PAGE_TOKEN,
         })
