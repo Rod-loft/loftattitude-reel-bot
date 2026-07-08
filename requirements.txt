@@ -5,3 +5,6 @@ schedule
 Pillow
 numpy
 flask
+moviepy
+flask
+imageio-ffmpeg
