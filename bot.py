@@ -210,18 +210,37 @@ def build_slideshow_video(image_bytes_list, output_path, seconds_per_image=3, fa
     """
     Assemble une liste d'images (bytes JPEG 9:16) en une video diaporama
     avec fondus enchaines, sans son (musique non geree par l'API Instagram).
+    Compatible moviepy v1 (set_duration/crossfadein) et v2 (with_duration/vfx).
     """
-    from moviepy.editor import ImageClip, concatenate_videoclips
+    try:
+        # moviepy >= 2.0 : API renommee (with_duration, with_fps, vfx.CrossFadeIn)
+        from moviepy import ImageClip, concatenate_videoclips, vfx
+        new_api = True
+    except ImportError:
+        # moviepy < 2.0
+        from moviepy.editor import ImageClip, concatenate_videoclips
+        new_api = False
 
     clips = []
     for img_bytes in image_bytes_list:
         arr = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
-        clip = ImageClip(arr).set_duration(seconds_per_image)
-        clip = clip.crossfadein(fade)
+        clip = ImageClip(arr)
+        if new_api:
+            clip = clip.with_duration(seconds_per_image)
+            try:
+                clip = clip.with_effects([vfx.CrossFadeIn(fade)])
+            except Exception as e:
+                print(f"  (fondu ignore: {e})")
+        else:
+            clip = clip.set_duration(seconds_per_image)
+            try:
+                clip = clip.crossfadein(fade)
+            except Exception as e:
+                print(f"  (fondu ignore: {e})")
         clips.append(clip)
 
     video = concatenate_videoclips(clips, method="compose", padding=-fade)
-    video = video.set_fps(30)
+    video = video.with_fps(30) if new_api else video.set_fps(30)
     video.write_videofile(
         output_path, codec="libx264", audio=False, preset="fast",
         threads=2, logger=None,
