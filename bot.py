@@ -222,21 +222,24 @@ def build_slideshow_video(image_bytes_list, output_path, seconds_per_image=3, fa
         new_api = False
 
     clips = []
-    for img_bytes in image_bytes_list:
+    for i, img_bytes in enumerate(image_bytes_list):
         arr = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
         clip = ImageClip(arr)
+        is_first = (i == 0)
         if new_api:
             clip = clip.with_duration(seconds_per_image)
-            try:
-                clip = clip.with_effects([vfx.CrossFadeIn(fade)])
-            except Exception as e:
-                print(f"  (fondu ignore: {e})")
+            if not is_first:
+                try:
+                    clip = clip.with_effects([vfx.CrossFadeIn(fade)])
+                except Exception as e:
+                    print(f"  (fondu ignore: {e})")
         else:
             clip = clip.set_duration(seconds_per_image)
-            try:
-                clip = clip.crossfadein(fade)
-            except Exception as e:
-                print(f"  (fondu ignore: {e})")
+            if not is_first:
+                try:
+                    clip = clip.crossfadein(fade)
+                except Exception as e:
+                    print(f"  (fondu ignore: {e})")
         clips.append(clip)
 
     video = concatenate_videoclips(clips, method="compose", padding=-fade)
@@ -266,6 +269,7 @@ def publish_reel(video_path, filename, caption):
             "video_url": video_url,
             "caption": caption,
             "share_to_feed": "true",
+            "thumb_offset": "300",
             "access_token": IG_TOKEN,
         })
         result = r.json()
