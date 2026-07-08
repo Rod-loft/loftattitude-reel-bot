@@ -1,8 +1,9 @@
-import os, time, requests, schedule, anthropic, json, base64, io
+import os, time, requests, schedule, anthropic, json, base64, io, threading
 import numpy as np
 from datetime import datetime
 from bs4 import BeautifulSoup
 from PIL import Image
+from flask import Flask, send_from_directory
 
 IG_USER_ID   = os.environ.get("IG_USER_ID", "17841400937343787")
 IG_TOKEN     = os.environ.get("IG_ACCESS_TOKEN", "")
@@ -10,9 +11,31 @@ CLAUDE_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
 IMGBB_KEY    = os.environ.get("IMGBB_API_KEY", "")
 FB_PAGE_ID   = os.environ.get("FB_PAGE_ID", "128965105483")
 FB_PAGE_TOKEN = os.environ.get("FB_PAGE_TOKEN", "")
+SOURCE_URL   = os.environ.get("SOURCE_URL", "https://www.loftattitude.com/fr/brand/66-richmond-interiors")
 IG_BASE      = "https://graph.instagram.com/v21.0"
 FB_BASE      = "https://graph.facebook.com/v21.0"
-HISTORY_FILE = "/tmp/published_products.json"
+HISTORY_FILE = os.environ.get("HISTORY_FILE", "/data/published_products.json")
+
+# URL publique du service Railway, necessaire pour heberger les videos de reel
+# (Railway l'injecte automatiquement dans RAILWAY_PUBLIC_DOMAIN, sinon la definir
+# manuellement en variable PUBLIC_BASE_URL sur Railway)
+PUBLIC_BASE_URL = os.environ.get(
+    "PUBLIC_BASE_URL",
+    f"https://{os.environ.get('RAILWAY_PUBLIC_DOMAIN', '')}" if os.environ.get("RAILWAY_PUBLIC_DOMAIN") else ""
+)
+VIDEO_DIR = "/tmp/reels"
+os.makedirs(VIDEO_DIR, exist_ok=True)
+
+# ─── SERVEUR FLASK (hebergement des videos de reel) ──────────────────────────
+
+app = Flask(__name__)
+
+@app.route("/media/<path:filename>")
+def serve_media(filename):
+    return send_from_directory(VIDEO_DIR, filename)
+
+def run_flask():
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
 
 # ─── HISTORIQUE ───────────────────────────────────────────────────────────────
 
@@ -25,6 +48,7 @@ def load_history():
 
 def save_history(history):
     try:
+        os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
         with open(HISTORY_FILE, "w") as f:
             json.dump(history[-50:], f)
     except Exception as e:
@@ -73,9 +97,10 @@ def is_white_background(img, threshold=240, min_ratio=0.25):
     except:
         return False
 
-def crop_to_45(image_bytes):
+def crop_to_ratio(image_bytes, target_w, target_h):
     """
-    Recadre intelligemment en 4:5 (1080x1350) :
+    Recadre intelligemment vers un ratio donne (ex: 1080x1350 pour 4:5,
+    1080x1920 pour 9:16) :
     - Lifestyle (fond colore) → zoom plein cadre, aucune bande
     - Detouré (fond blanc)   → produit ENTIER centre, fond blanc propre
     """
@@ -87,7 +112,6 @@ def crop_to_45(image_bytes):
         img = trim_white_borders(img)
         print(f"  Apres rognage: {img.size}")
 
-        target_w, target_h = 1080, 1350
         target_ratio = target_w / target_h
         w, h = img.size
         src_ratio = w / h
@@ -134,6 +158,14 @@ def crop_to_45(image_bytes):
         print(f"Erreur recadrage: {e}")
         return image_bytes
 
+def crop_to_45(image_bytes):
+    """Recadrage 4:5 (1080x1350) pour carrousels photo."""
+    return crop_to_ratio(image_bytes, 1080, 1350)
+
+def crop_to_916(image_bytes):
+    """Recadrage 9:16 (1080x1920) pour reels video."""
+    return crop_to_ratio(image_bytes, 1080, 1920)
+
 def upload_to_imgbb(image_bytes):
     try:
         img_b64 = base64.b64encode(image_bytes).decode("utf-8")
@@ -160,6 +192,98 @@ def process_image(image_url):
     except Exception as e:
         print(f"Erreur traitement: {e}")
         return None
+
+def fetch_and_crop_916(image_url):
+    """Telecharge une image et la recadre en 9:16, retourne les octets JPEG (pas d'upload)."""
+    try:
+        r = requests.get(image_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        if r.status_code != 200:
+            return None
+        return crop_to_916(r.content)
+    except Exception as e:
+        print(f"Erreur traitement 9:16: {e}")
+        return None
+
+# ─── GENERATION VIDEO (REEL) ──────────────────────────────────────────────────
+
+def build_slideshow_video(image_bytes_list, output_path, seconds_per_image=3, fade=0.4):
+    """
+    Assemble une liste d'images (bytes JPEG 9:16) en une video diaporama
+    avec fondus enchaines, sans son (musique non geree par l'API Instagram).
+    """
+    from moviepy.editor import ImageClip, concatenate_videoclips
+
+    clips = []
+    for img_bytes in image_bytes_list:
+        arr = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
+        clip = ImageClip(arr).set_duration(seconds_per_image)
+        clip = clip.crossfadein(fade)
+        clips.append(clip)
+
+    video = concatenate_videoclips(clips, method="compose", padding=-fade)
+    video = video.set_fps(30)
+    video.write_videofile(
+        output_path, codec="libx264", audio=False, preset="fast",
+        threads=2, logger=None,
+    )
+    return output_path
+
+def publish_reel(video_path, filename, caption):
+    """
+    Publie un reel Instagram a partir d'un fichier video local, servi
+    publiquement via le petit serveur Flask integre a ce process.
+    """
+    if not PUBLIC_BASE_URL:
+        print("PUBLIC_BASE_URL non configure, impossible d'heberger la video")
+        return False
+    if not IG_TOKEN:
+        return False
+    try:
+        video_url = f"{PUBLIC_BASE_URL}/media/{filename}"
+        print(f"  Video hebergee: {video_url}")
+
+        r = requests.post(f"{IG_BASE}/{IG_USER_ID}/media", data={
+            "media_type": "REELS",
+            "video_url": video_url,
+            "caption": caption,
+            "share_to_feed": "true",
+            "access_token": IG_TOKEN,
+        })
+        result = r.json()
+        if "id" not in result:
+            print(f"Erreur creation container reel: {result}")
+            return False
+        creation_id = result["id"]
+
+        print("  Attente du traitement video...")
+        for attempt in range(30):
+            time.sleep(5)
+            status_r = requests.get(f"{IG_BASE}/{creation_id}", params={
+                "fields": "status_code", "access_token": IG_TOKEN,
+            })
+            status = status_r.json().get("status_code")
+            print(f"    Statut ({attempt+1}/30): {status}")
+            if status == "FINISHED":
+                break
+            if status == "ERROR":
+                print("Erreur traitement video Instagram")
+                return False
+        else:
+            print("Timeout traitement video")
+            return False
+
+        r2 = requests.post(f"{IG_BASE}/{IG_USER_ID}/media_publish", data={
+            "creation_id": creation_id, "access_token": IG_TOKEN,
+        })
+        result2 = r2.json()
+        if "id" in result2:
+            print(f"Reel Instagram OK ! ID: {result2['id']}")
+            return True
+        print(f"Erreur publication reel: {result2}")
+        return False
+    except Exception as e:
+        print(f"Erreur reel: {e}")
+        return False
 
 # ─── SCRAPING ─────────────────────────────────────────────────────────────────
 
@@ -236,7 +360,7 @@ def select_best_images(images, max_images=5):
 def get_next_product():
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        r = requests.get("https://www.loftattitude.com/fr/nouveaux-produits", headers=headers, timeout=15)
+        r = requests.get(SOURCE_URL, headers=headers, timeout=15)
         soup = BeautifulSoup(r.text, "html.parser")
         products = soup.select(".product-miniature")
         if not products:
@@ -412,16 +536,26 @@ def publish_facebook(images_urls, caption, product_url):
         print(f"Erreur Facebook: {e}")
         return False
 
+# Jours ou Instagram publie un REEL video (lundi, mercredi, jeudi, samedi, dimanche)
+# datetime.weekday(): Lundi=0, Mardi=1, Mercredi=2, Jeudi=3, Vendredi=4, Samedi=5, Dimanche=6
+IG_REEL_DAYS = {0, 2, 3, 5, 6}
+# Les autres jours (mardi=1, vendredi=4), Instagram publie un carrousel photo comme Facebook
+
 def daily_job():
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_dt = datetime.now()
+    now = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    is_reel_day = now_dt.weekday() in IG_REEL_DAYS
     print(f"\n{'='*50}")
     print(f"[{now}] Debut publication Loft Attitude")
+    print(f"Mode Instagram du jour: {'REEL' if is_reel_day else 'CARROUSEL'}")
     print(f"{'='*50}")
+
     product = get_next_product()
     if not product:
         print("Pas de nouveau produit aujourd'hui.")
         return
     print(f"Produit: {product['nom']} | Prix: {product['prix']}")
+
     all_images = get_product_images(product["url"]) if product["url"] else []
     if not all_images and product["image_url"]:
         all_images = [product["image_url"]]
@@ -429,6 +563,7 @@ def daily_job():
     if not best_images:
         print("Pas d'images.")
         return
+
     print("\nTraitement images (smart crop 4:5)...")
     processed_urls = []
     for i, img_url in enumerate(best_images):
@@ -438,15 +573,45 @@ def daily_job():
     if not processed_urls:
         return
     print(f"{len(processed_urls)} images pretes")
+
     caption = generate_caption(product)
     print(f"Caption: {len(caption)} caracteres")
-    print("\n--- INSTAGRAM ---")
-    ig_ok = publish_instagram(processed_urls, caption)
-    print("Instagram: OK" if ig_ok else "Instagram: ECHEC")
-    print("\n--- FACEBOOK ---")
+
+    # --- FACEBOOK : carrousel photo tous les jours ---
+    print("\n--- FACEBOOK (carrousel) ---")
     fb_ok = publish_facebook(processed_urls, caption, product["url"])
     print("Facebook: OK" if fb_ok else "Facebook: ECHEC")
-    if ig_ok:
+
+    # --- INSTAGRAM : reel ou carrousel selon le jour ---
+    if is_reel_day:
+        print("\n--- INSTAGRAM (reel) ---")
+        print("Preparation des images 9:16 pour la video...")
+        reel_frames = []
+        for i, img_url in enumerate(best_images):
+            print(f"  Frame {i+1}/{len(best_images)}...")
+            frame_bytes = fetch_and_crop_916(img_url)
+            if frame_bytes:
+                reel_frames.append(frame_bytes)
+        if not reel_frames:
+            print("Pas d'images pour le reel.")
+            ig_ok = False
+        else:
+            video_filename = f"reel_{int(time.time())}.mp4"
+            video_path = os.path.join(VIDEO_DIR, video_filename)
+            print("Generation de la video (diaporama, fondus enchaines)...")
+            try:
+                build_slideshow_video(reel_frames, video_path)
+                print("Video generee, publication...")
+                ig_ok = publish_reel(video_path, video_filename, caption)
+            except Exception as e:
+                print(f"Erreur generation/publication reel: {e}")
+                ig_ok = False
+    else:
+        print("\n--- INSTAGRAM (carrousel) ---")
+        ig_ok = publish_instagram(processed_urls, caption)
+    print("Instagram: OK" if ig_ok else "Instagram: ECHEC")
+
+    if ig_ok or fb_ok:
         mark_as_published(product["url"])
     print(f"\nResultat: Instagram={'OK' if ig_ok else 'ECHEC'} | Facebook={'OK' if fb_ok else 'ECHEC'}")
 
@@ -454,11 +619,19 @@ if __name__ == "__main__":
     print("Bot Loft Attitude v10 - Smart crop: lifestyle=plein cadre / detouré=produit entier")
     print(f"IG_USER_ID:   {IG_USER_ID}")
     print(f"FB_PAGE_ID:   {FB_PAGE_ID}")
+    print(f"Source:       {SOURCE_URL}")
+    print(f"Historique:   {HISTORY_FILE}")
     print(f"IMGBB:        {'OK' if IMGBB_KEY else 'MANQUANT'}")
     print(f"Token IG:     {'OK' if IG_TOKEN else 'MANQUANT'}")
     print(f"Token FB Page:{'OK' if FB_PAGE_TOKEN else 'MANQUANT'}")
     print(f"Claude:       {'OK' if CLAUDE_KEY else 'MANQUANT'}")
+    print(f"PUBLIC_BASE_URL (reels): {PUBLIC_BASE_URL or 'MANQUANT'}")
+    print("Rythme: Facebook=carrousel tous les jours | Instagram=reel (Lun/Mer/Jeu/Sam/Dim) ou carrousel (Mar/Ven)")
     print("Publication planifiee a 09:00\n")
+
+    # Serveur Flask (hebergement des videos de reel) en arriere-plan
+    threading.Thread(target=run_flask, daemon=True).start()
+
     daily_job()
     schedule.every().day.at("09:00").do(daily_job)
     while True:
