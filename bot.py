@@ -89,40 +89,43 @@ def is_white_background(img, threshold=242, min_ratio=0.35):
 
 def crop_to_45(image_bytes):
     """
-    Recadre en 4:5 (1080x1350) intelligemment sans jamais couper le produit.
-    - Détouré (fond blanc) : produit entier centré, fond blanc
-    - Lifestyle : recadre avec max 15% de coupe de chaque côté
+    Recadre en 4:5 (1080x1350) intelligemment :
+    - Lifestyle (fond colore) : AUCUN rognage, juste recadrage 4:5 au centre
+    - Detouré (fond blanc)   : rognage bandes, produit entier centré
     """
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         w, h = img.size
         print(f"  Taille originale: {w}x{h}")
 
-        # Securite : dimensions valides
         if w <= 0 or h <= 0:
             return image_bytes
 
-        # Supprime uniquement les vraies grandes bandes blanches
-        img = trim_white_borders(img)
-        w, h = img.size
+        target_w, target_h = 1080, 1350
+        target_ratio = target_w / target_h
 
-        # Securite apres rognage
-        if w <= 0 or h <= 0:
-            img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        if h == 0:
+            return image_bytes
+
+        # Detecte d'abord si fond blanc sur l'image originale
+        fond_blanc = is_white_background(img)
+        print(f"  Type: {'detouré fond blanc' if fond_blanc else 'lifestyle (pas de rognage)'}")
+
+        # Rognage UNIQUEMENT pour les photos detourees sur fond blanc
+        if fond_blanc:
+            img = trim_white_borders(img)
+            w, h = img.size
+            if w <= 0 or h <= 0:
+                img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+                w, h = img.size
+            print(f"  Apres rognage: {w}x{h}")
+        # Pour les photos lifestyle : on garde l'image telle quelle
+        else:
             w, h = img.size
 
-        print(f"  Apres rognage: {w}x{h}")
-
-        target_w, target_h = 1080, 1350
-        target_ratio = target_w / target_h  # 0.8
-
-        # Securite division
         if h == 0:
             return image_bytes
         src_ratio = w / h
-
-        fond_blanc = is_white_background(img)
-        print(f"  Type: {'detouré fond blanc' if fond_blanc else 'lifestyle'}")
 
         if fond_blanc:
             # Produit détouré : entier, centré, fond blanc, marge 60px
@@ -278,15 +281,15 @@ def is_lifestyle_image(image_url):
                 "role": "user",
                 "content": [
                     {"type": "image", "source": {"type": "base64", "media_type": content_type, "data": img_b64}},
-                    {"type": "text", "text": 'Analyse cette image. Reponds UNIQUEMENT en JSON: {"lifestyle": true/false, "score": 0-10}\nlifestyle=true si photo dans un interieur/ambiance/mise en scene\nlifestyle=false si fond blanc/uni/produit seul detouré\nscore: qualite visuelle Instagram'}
+                    {"type": "text", "text": 'Analyse cette image produit. Reponds UNIQUEMENT en JSON: {"lifestyle": true/false, "score": 0-10, "produit_entier": true/false}\nlifestyle=true si photo dans un interieur/ambiance/mise en scene avec le produit visible\nlifestyle=false si fond blanc/uni/produit seul detouré\nproduit_entier=true si on voit le produit en entier, false si cest un detail/zoom/texture\nscore: qualite visuelle Instagram (penalise fortement les zooms sur details/textures, favorise les vues completes du produit)'}
                 ]
             }]
         )
         result = json.loads(msg.content[0].text.replace("```json","").replace("```","").strip())
-        return result.get("lifestyle", False), result.get("score", 0)
+        return result.get("lifestyle", False), result.get("score", 0), result.get("produit_entier", True)
     except Exception as e:
         print(f"Erreur analyse image: {e}")
-        return False, 0
+        return False, 0, True
 
 def select_best_images(images, max_images=5):
     if not images:
@@ -295,10 +298,11 @@ def select_best_images(images, max_images=5):
     scored = []
     for i, img_url in enumerate(images[:8]):
         print(f"  Image {i+1}...")
-        is_lifestyle, score = is_lifestyle_image(img_url)
-        final_score = score + (5 if is_lifestyle else 0)
-        scored.append({"url": img_url, "lifestyle": is_lifestyle, "score": final_score})
-        print(f"  -> Lifestyle: {is_lifestyle}, Score: {final_score}")
+        is_lifestyle, score, produit_entier = is_lifestyle_image(img_url)
+        # Bonus lifestyle + bonus produit entier, malus si detail/zoom
+        final_score = score + (5 if is_lifestyle else 0) + (3 if produit_entier else -4)
+        scored.append({"url": img_url, "lifestyle": is_lifestyle, "score": final_score, "entier": produit_entier})
+        print(f"  -> Lifestyle: {is_lifestyle}, Entier: {produit_entier}, Score: {final_score}")
     scored.sort(key=lambda x: x["score"], reverse=True)
     best = [item["url"] for item in scored[:max_images]]
     lifestyle_count = sum(1 for item in scored[:max_images] if item["lifestyle"])
@@ -499,7 +503,7 @@ def daily_job():
     print(f"\nResultat: Instagram={'OK' if ig_ok else 'ECHEC'} | Facebook={'OK' if fb_ok else 'ECHEC'}")
 
 if __name__ == "__main__":
-    print("Bot Loft Attitude v13 - FB_PAGE_TOKEN direct + bug division zero corrige")
+    print("Bot Loft Attitude v15 - Lifestyle sans rognage / Detouré rognage+centrage")
     print(f"IG_USER_ID:  {IG_USER_ID}")
     print(f"FB_PAGE_ID:  {FB_PAGE_ID}")
     print(f"IMGBB:       {'OK' if IMGBB_KEY else 'MANQUANT'}")
