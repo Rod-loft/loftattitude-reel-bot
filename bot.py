@@ -9,6 +9,7 @@ IG_TOKEN     = os.environ.get("IG_ACCESS_TOKEN", "")
 CLAUDE_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
 IMGBB_KEY    = os.environ.get("IMGBB_API_KEY", "")
 FB_PAGE_ID   = os.environ.get("FB_PAGE_ID", "100063636817093")
+FB_TOKEN     = os.environ.get("FB_PAGE_TOKEN", "")
 IG_BASE      = "https://graph.instagram.com/v21.0"
 FB_BASE      = "https://graph.facebook.com/v21.0"
 HISTORY_FILE = "/tmp/published_products.json"
@@ -412,22 +413,15 @@ def publish_instagram(images_urls, caption):
     return False
 
 def publish_facebook(images_urls, caption, product_url):
-    if not FB_PAGE_ID or not IG_TOKEN:
-        print("Facebook non configure")
+    if not FB_PAGE_ID or not FB_TOKEN:
+        print("Facebook non configure - FB_PAGE_ID ou FB_PAGE_TOKEN manquant")
         return False
     try:
-        print(f"Publication Facebook sur {FB_PAGE_ID}...")
-        r_pages = requests.get(f"{FB_BASE}/me/accounts", params={"access_token": IG_TOKEN})
-        pages = r_pages.json().get("data", [])
-        page_token = None
-        for page in pages:
-            if page.get("id") == FB_PAGE_ID:
-                page_token = page.get("access_token")
-                print(f"Token Page trouve: {page.get('name')}")
-                break
-        if not page_token:
-            print(f"Token Page non trouve. Pages: {[p.get('name') for p in pages]}")
+        if not FB_TOKEN:
+            print("FB_PAGE_TOKEN manquant dans les variables")
             return False
+        page_token = FB_TOKEN
+        print(f"Publication Facebook sur {FB_PAGE_ID} avec FB_PAGE_TOKEN...")
         if len(images_urls) == 1:
             r = requests.post(f"{FB_BASE}/{FB_PAGE_ID}/photos", data={
                 "url": images_urls[0], "caption": caption + f"\n\n🔗 {product_url}",
@@ -505,7 +499,7 @@ def daily_job():
     print(f"\nResultat: Instagram={'OK' if ig_ok else 'ECHEC'} | Facebook={'OK' if fb_ok else 'ECHEC'}")
 
 if __name__ == "__main__":
-    print("Bot Loft Attitude v12 - Bug division zero corrige + token renouvele")
+    print("Bot Loft Attitude v13 - FB_PAGE_TOKEN direct + bug division zero corrige")
     print(f"IG_USER_ID:  {IG_USER_ID}")
     print(f"FB_PAGE_ID:  {FB_PAGE_ID}")
     print(f"IMGBB:       {'OK' if IMGBB_KEY else 'MANQUANT'}")
