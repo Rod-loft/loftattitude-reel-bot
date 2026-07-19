@@ -42,10 +42,7 @@ def mark_as_published(product_url):
 # ─── TRAITEMENT IMAGE ─────────────────────────────────────────────────────────
 
 def trim_white_borders(img, threshold=230, min_band=30):
-    """
-    Supprime UNIQUEMENT les vraies bandes blanches larges (>30px).
-    Ne touche pas aux images sans bandes significatives.
-    """
+    """Supprime uniquement les vraies bandes blanches larges (>30px)"""
     try:
         arr = np.array(img.convert("L"))
         mask = arr < threshold
@@ -59,15 +56,19 @@ def trim_white_borders(img, threshold=230, min_band=30):
         left   = int(np.argmax(cols))
         right  = int(len(cols) - np.argmax(cols[::-1]))
 
-        # Ne rogne QUE si les bandes sont vraiment larges (>30px)
-        actual_top    = top    if top    > min_band else 0
-        actual_bottom = img.height - bottom if (img.height - bottom) > min_band else img.height
-        actual_left   = left   if left   > min_band else 0
-        actual_right  = img.width - right if (img.width - right) > min_band else img.width
+        # Ne rogne que si les bandes sont vraiment larges
+        crop_top    = top    if top    > min_band else 0
+        crop_bottom = bottom if (img.height - bottom) > min_band else img.height
+        crop_left   = left   if left   > min_band else 0
+        crop_right  = right  if (img.width - right) > min_band else img.width
 
-        if actual_top > 0 or actual_bottom < img.height or actual_left > 0 or actual_right < img.width:
-            print(f"  Bandes supprimees (haut:{actual_top} bas:{img.height-actual_bottom} gauche:{actual_left} droite:{img.width-actual_right})")
-            return img.crop((actual_left, actual_top, actual_right, actual_bottom))
+        # Securite : verifie que le crop est valide
+        if crop_left >= crop_right or crop_top >= crop_bottom:
+            return img
+
+        if crop_top > 0 or crop_bottom < img.height or crop_left > 0 or crop_right < img.width:
+            print(f"  Bandes supprimees (haut:{crop_top} bas:{img.height-crop_bottom} gauche:{crop_left} droite:{img.width-crop_right})")
+            return img.crop((crop_left, crop_top, crop_right, crop_bottom))
 
         return img
     except Exception as e:
@@ -87,35 +88,55 @@ def is_white_background(img, threshold=242, min_ratio=0.35):
 
 def crop_to_45(image_bytes):
     """
-    Recadre en 4:5 (1080x1350) intelligemment :
-    - Lifestyle → recadre au centre en conservant un max de l'image
-    - Détouré (fond blanc) → produit ENTIER centré avec marge, rien coupé
+    Recadre en 4:5 (1080x1350) intelligemment sans jamais couper le produit.
+    - Détouré (fond blanc) : produit entier centré, fond blanc
+    - Lifestyle : recadre avec max 15% de coupe de chaque côté
     """
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        print(f"  Taille originale: {img.size}")
+        w, h = img.size
+        print(f"  Taille originale: {w}x{h}")
+
+        # Securite : dimensions valides
+        if w <= 0 or h <= 0:
+            return image_bytes
 
         # Supprime uniquement les vraies grandes bandes blanches
         img = trim_white_borders(img)
-        print(f"  Apres rognage: {img.size}")
+        w, h = img.size
+
+        # Securite apres rognage
+        if w <= 0 or h <= 0:
+            img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+            w, h = img.size
+
+        print(f"  Apres rognage: {w}x{h}")
 
         target_w, target_h = 1080, 1350
         target_ratio = target_w / target_h  # 0.8
-        w, h = img.size
+
+        # Securite division
+        if h == 0:
+            return image_bytes
         src_ratio = w / h
 
         fond_blanc = is_white_background(img)
-        print(f"  Type: {'detouré fond blanc' if fond_blanc else 'lifestyle/couleur'}")
+        print(f"  Type: {'detouré fond blanc' if fond_blanc else 'lifestyle'}")
 
         if fond_blanc:
-            # Produit détouré : ENTIER, centré, marge confortable, rien coupé
+            # Produit détouré : entier, centré, fond blanc, marge 60px
             canvas = Image.new("RGB", (target_w, target_h), (255, 255, 255))
-            margin = 60  # marge de 60px de chaque côté
+            margin = 60
             max_w = target_w - margin * 2
             max_h = target_h - margin * 2
+
+            # Securite
+            if w == 0 or h == 0:
+                return image_bytes
+
             scale = min(max_w / w, max_h / h)
-            new_w = int(w * scale)
-            new_h = int(h * scale)
+            new_w = max(1, int(w * scale))
+            new_h = max(1, int(h * scale))
             img_resized = img.resize((new_w, new_h), Image.LANCZOS)
             x = (target_w - new_w) // 2
             y = (target_h - new_h) // 2
@@ -124,51 +145,57 @@ def crop_to_45(image_bytes):
             print(f"  → Produit entier {new_w}x{new_h} sur fond blanc")
 
         else:
-            # Photo lifestyle : recadre intelligemment
-            # Si l'image est proche du ratio 4:5, on la redimensionne sans couper
-            ratio_diff = abs(src_ratio - target_ratio) / target_ratio
+            # Photo lifestyle : recadre en perdant le moins possible
+            ratio_diff = abs(src_ratio - target_ratio) / target_ratio if target_ratio > 0 else 1
 
             if ratio_diff < 0.15:
-                # Ratio proche de 4:5 (<15% d'écart) : juste redimensionner
+                # Ratio proche 4:5 : redimensionne direct
                 img_final = img.resize((target_w, target_h), Image.LANCZOS)
-                print(f"  → Lifestyle: redimensionne direct (ratio proche 4:5)")
+                print(f"  → Redimensionne direct (ratio proche)")
 
             elif src_ratio > target_ratio:
-                # Image paysage : coupe les côtés (max 15% de chaque côté)
+                # Paysage : coupe les côtés max 15%
                 new_h = target_h
-                new_w = int(new_h * src_ratio)
+                new_w = max(1, int(new_h * src_ratio))
                 img_resized = img.resize((new_w, new_h), Image.LANCZOS)
-                # Coupe max 15% de chaque côté
-                max_cut = int(new_w * 0.15)
-                left = min((new_w - target_w) // 2, max_cut)
-                # Si ça ne suffit pas, on ajoute fond blanc sur les côtés
-                if new_w - 2 * left < target_w:
+                excess = new_w - target_w
+                if excess <= 0:
+                    # Pas assez large, centre avec fond blanc
                     canvas = Image.new("RGB", (target_w, target_h), (255, 255, 255))
                     x = (target_w - new_w) // 2
                     canvas.paste(img_resized, (x, 0))
                     img_final = canvas
                 else:
-                    img_final = img_resized.crop((left, 0, left + target_w, target_h))
-                print(f"  → Lifestyle paysage: coupe {left}px de chaque côté")
+                    max_cut = int(new_w * 0.15)
+                    left = min(excess // 2, max_cut)
+                    right_crop = left + target_w
+                    if right_crop > new_w:
+                        right_crop = new_w
+                        left = max(0, right_crop - target_w)
+                    img_final = img_resized.crop((left, 0, right_crop, target_h))
+                print(f"  → Lifestyle paysage")
 
             else:
-                # Image portrait/carrée : coupe haut/bas (max 20% de chaque côté)
+                # Portrait : coupe haut/bas max 20%
                 new_w = target_w
-                new_h = int(new_w / src_ratio)
+                new_h = max(1, int(new_w / src_ratio)) if src_ratio > 0 else target_h
                 img_resized = img.resize((new_w, new_h), Image.LANCZOS)
-                max_cut = int(new_h * 0.20)
-                top = min((new_h - target_h) // 2, max_cut)
-                if top < 0: top = 0
-                bottom = top + target_h
-                if bottom > new_h:
-                    # Pas assez grand, on centre avec fond blanc
+                excess = new_h - target_h
+                if excess <= 0:
+                    # Pas assez grand, centre avec fond blanc
                     canvas = Image.new("RGB", (target_w, target_h), (255, 255, 255))
                     y = (target_h - new_h) // 2
                     canvas.paste(img_resized, (0, y))
                     img_final = canvas
                 else:
-                    img_final = img_resized.crop((0, top, target_w, bottom))
-                print(f"  → Lifestyle portrait: coupe {top}px haut/bas")
+                    max_cut = int(new_h * 0.20)
+                    top = min(excess // 2, max_cut)
+                    bottom_crop = top + target_h
+                    if bottom_crop > new_h:
+                        bottom_crop = new_h
+                        top = max(0, bottom_crop - target_h)
+                    img_final = img_resized.crop((0, top, target_w, bottom_crop))
+                print(f"  → Lifestyle portrait")
 
         output = io.BytesIO()
         img_final.save(output, format="JPEG", quality=92)
@@ -455,12 +482,13 @@ def daily_job():
     if not best_images:
         print("Pas d'images.")
         return
-    print("\nTraitement images (smart crop v11)...")
+    print("\nTraitement images...")
     processed_urls = []
     for i, img_url in enumerate(best_images):
         print(f"  Image {i+1}: {img_url[:70]}...")
         public_url = process_image(img_url)
         processed_urls.append(public_url if public_url else img_url)
+    processed_urls = [u for u in processed_urls if u]
     if not processed_urls:
         return
     print(f"{len(processed_urls)} images pretes")
@@ -477,7 +505,7 @@ def daily_job():
     print(f"\nResultat: Instagram={'OK' if ig_ok else 'ECHEC'} | Facebook={'OK' if fb_ok else 'ECHEC'}")
 
 if __name__ == "__main__":
-    print("Bot Loft Attitude v11 - Recadrage intelligent, produit jamais coupe")
+    print("Bot Loft Attitude v12 - Bug division zero corrige + token renouvele")
     print(f"IG_USER_ID:  {IG_USER_ID}")
     print(f"FB_PAGE_ID:  {FB_PAGE_ID}")
     print(f"IMGBB:       {'OK' if IMGBB_KEY else 'MANQUANT'}")
