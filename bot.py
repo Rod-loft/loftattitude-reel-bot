@@ -2,7 +2,7 @@ import os, time, requests, schedule, anthropic, json, base64, io
 import numpy as np
 from datetime import datetime
 from bs4 import BeautifulSoup
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 IG_USER_ID   = os.environ.get("IG_USER_ID", "17841400937343787")
 IG_TOKEN     = os.environ.get("IG_ACCESS_TOKEN", "")
@@ -13,6 +13,16 @@ FB_TOKEN     = os.environ.get("FB_PAGE_TOKEN", "")
 IG_BASE      = "https://graph.instagram.com/v21.0"
 FB_BASE      = "https://graph.facebook.com/v21.0"
 HISTORY_FILE = "/tmp/published_products.json"
+STORY_HISTORY_FILE = os.path.join(os.path.dirname(HISTORY_FILE), "published_stories.json")
+
+# ─── STORIES : MARQUES CIBLEES ─────────────────────────────────────────────────
+
+STORY_BRAND_URLS = [
+    "https://www.loftattitude.com/fr/brand/18-camino-a-casa",
+    "https://www.loftattitude.com/fr/brand/7-kare-design",
+    "https://www.loftattitude.com/fr/brand/62-villeroy-boch",
+]
+STORY_MIN_PRICE = 100.0
 
 # ─── HISTORIQUE ───────────────────────────────────────────────────────────────
 
@@ -39,6 +49,30 @@ def mark_as_published(product_url):
         history.append(product_url)
         save_history(history)
     print(f"Produit marque comme publie: {product_url}")
+
+def load_story_history():
+    try:
+        with open(STORY_HISTORY_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return []
+
+def save_story_history(history):
+    try:
+        with open(STORY_HISTORY_FILE, "w") as f:
+            json.dump(history[-200:], f)
+    except Exception as e:
+        print(f"Erreur sauvegarde historique stories: {e}")
+
+def already_in_story(product_url):
+    return product_url in load_story_history()
+
+def mark_as_storied(product_url):
+    history = load_story_history()
+    if product_url not in history:
+        history.append(product_url)
+        save_story_history(history)
+    print(f"Produit marque comme publie en story: {product_url}")
 
 # ─── TRAITEMENT IMAGE ─────────────────────────────────────────────────────────
 
@@ -209,6 +243,123 @@ def crop_to_45(image_bytes):
         print(f"Erreur recadrage: {e}")
         return image_bytes
 
+def crop_to_916(image_bytes):
+    """
+    Recadre en 9:16 (1080x1920) pour les Stories Instagram :
+    - Lifestyle (fond colore) : recadrage centre, perte minimale
+    - Detouré (fond blanc)   : produit entier centré sur fond blanc
+    """
+    try:
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        w, h = img.size
+        if w <= 0 or h <= 0:
+            return image_bytes
+
+        target_w, target_h = 1080, 1920
+        target_ratio = target_w / target_h
+
+        fond_blanc = is_white_background(img)
+        if fond_blanc:
+            img = trim_white_borders(img)
+            w, h = img.size
+            if w <= 0 or h <= 0:
+                img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+                w, h = img.size
+
+        if h == 0:
+            return image_bytes
+        src_ratio = w / h
+
+        if fond_blanc:
+            canvas = Image.new("RGB", (target_w, target_h), (255, 255, 255))
+            margin_x, margin_y = 80, 260
+            max_w = target_w - margin_x * 2
+            max_h = target_h - margin_y * 2
+            scale = min(max_w / w, max_h / h)
+            new_w = max(1, int(w * scale))
+            new_h = max(1, int(h * scale))
+            img_resized = img.resize((new_w, new_h), Image.LANCZOS)
+            x = (target_w - new_w) // 2
+            y = (target_h - new_h) // 2
+            canvas.paste(img_resized, (x, y))
+            img_final = canvas
+        else:
+            if src_ratio > target_ratio:
+                # Image plus large que 9:16 : on comble en hauteur, on coupe les cotes
+                new_h = target_h
+                new_w = max(1, int(new_h * src_ratio))
+                img_resized = img.resize((new_w, new_h), Image.LANCZOS)
+                x = (new_w - target_w) // 2
+                img_final = img_resized.crop((x, 0, x + target_w, target_h))
+            else:
+                # Image plus haute/étroite que 9:16 : on comble en largeur, on coupe haut/bas
+                new_w = target_w
+                new_h = max(1, int(new_w / src_ratio)) if src_ratio > 0 else target_h
+                img_resized = img.resize((new_w, new_h), Image.LANCZOS)
+                y = max(0, (new_h - target_h) // 2)
+                img_final = img_resized.crop((0, y, target_w, min(y + target_h, new_h)))
+                if img_final.size != (target_w, target_h):
+                    canvas = Image.new("RGB", (target_w, target_h), (255, 255, 255))
+                    canvas.paste(img_final, (0, (target_h - img_final.height) // 2))
+                    img_final = canvas
+
+        output = io.BytesIO()
+        img_final.save(output, format="JPEG", quality=92)
+        return output.getvalue()
+    except Exception as e:
+        print(f"Erreur recadrage story: {e}")
+        return image_bytes
+
+def _load_story_font(size):
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    ]
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+def add_story_overlay(image_bytes, product):
+    """
+    Ajoute un bandeau en bas de la story : nom du produit, prix, et appel a l'action.
+    Meta ne permet pas de sticker lien cliquable via l'API -> texte incruste a la place.
+    """
+    try:
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        w, h = img.size
+        overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+
+        band_h = 300
+        for i in range(band_h):
+            alpha = int(190 * (i / band_h))
+            draw.line([(0, h - band_h + i), (w, h - band_h + i)], fill=(0, 0, 0, alpha))
+        draw.rectangle([0, h - 40, w, h], fill=(0, 0, 0, 210))
+
+        name_font  = _load_story_font(52)
+        price_font = _load_story_font(64)
+        cta_font   = _load_story_font(38)
+
+        name = product.get("nom", "")[:60]
+        prix = product.get("prix", "")
+
+        draw.text((50, h - 250), name, font=name_font, fill=(255, 255, 255, 255))
+        if prix:
+            draw.text((50, h - 185), prix, font=price_font, fill=(255, 255, 255, 255))
+        draw.text((50, h - 95), "Decouvrir -> loftattitude.com", font=cta_font, fill=(230, 230, 230, 255))
+
+        final_img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+        output = io.BytesIO()
+        final_img.save(output, format="JPEG", quality=92)
+        return output.getvalue()
+    except Exception as e:
+        print(f"Erreur overlay story: {e}")
+        return image_bytes
+
 def upload_to_imgbb(image_bytes):
     try:
         img_b64 = base64.b64encode(image_bytes).decode("utf-8")
@@ -308,6 +459,114 @@ def select_best_images(images, max_images=5):
     lifestyle_count = sum(1 for item in scored[:max_images] if item["lifestyle"])
     print(f"Selection: {len(best)} images ({lifestyle_count} lifestyle)")
     return best
+
+def parse_price(text):
+    try:
+        cleaned = text.replace("\xa0", " ").replace("€", "").strip()
+        cleaned = cleaned.replace(" ", "").replace(",", ".")
+        return float(cleaned)
+    except Exception:
+        return 0.0
+
+def get_story_candidate():
+    """Parcourt les 3 pages marques ciblees, filtre les produits >100€ pas encore en story."""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        candidates = []
+        for brand_url in STORY_BRAND_URLS:
+            url = brand_url + ("&" if "?" in brand_url else "?") + "resultsPerPage=99999"
+            r = requests.get(url, headers=headers, timeout=15)
+            soup = BeautifulSoup(r.text, "html.parser")
+            products = soup.select(".product-miniature")
+            print(f"  {brand_url.split('/')[-1]}: {len(products)} produits")
+            for product in products:
+                name_el  = product.select_one(".product-title")
+                price_el = product.select_one(".price")
+                img_el   = product.select_one("img")
+                link_el  = product.select_one("a")
+                if not price_el:
+                    continue
+                prix_val = parse_price(price_el.text.strip())
+                if prix_val < STORY_MIN_PRICE:
+                    continue
+                href = link_el.get("href", "") if link_el else ""
+                product_url = href if href.startswith("http") else "https://www.loftattitude.com" + href
+                if not product_url or already_in_story(product_url):
+                    continue
+                img_url = img_el.get("data-src") or img_el.get("src") if img_el else ""
+                if img_url and img_url.startswith("/"):
+                    img_url = "https://www.loftattitude.com" + img_url
+                candidates.append({
+                    "nom":       name_el.text.strip()  if name_el  else "Produit design",
+                    "prix":      price_el.text.strip() if price_el else "",
+                    "prix_val":  prix_val,
+                    "image_url": img_url,
+                    "url":       product_url,
+                })
+        if not candidates:
+            print("Aucun candidat story disponible (tout deja publie ou <100€).")
+            return None
+        # Priorite au prix le plus eleve pour varier des posts feed
+        candidates.sort(key=lambda p: p["prix_val"], reverse=True)
+        return candidates[0]
+    except Exception as e:
+        print(f"Erreur scraping stories: {e}")
+        return None
+
+def publish_instagram_story(image_url):
+    if not image_url or not IG_TOKEN:
+        return False
+    r1 = requests.post(f"{IG_BASE}/{IG_USER_ID}/media", data={
+        "image_url": image_url, "media_type": "STORIES", "access_token": IG_TOKEN,
+    })
+    result1 = r1.json()
+    if "id" not in result1:
+        print(f"Erreur creation story: {result1}")
+        return False
+    time.sleep(15)
+    r2 = requests.post(f"{IG_BASE}/{IG_USER_ID}/media_publish", data={
+        "creation_id": result1["id"], "access_token": IG_TOKEN,
+    })
+    result2 = r2.json()
+    if "id" in result2:
+        print(f"Story Instagram OK ! ID: {result2['id']}")
+        return True
+    print(f"Erreur publication story: {result2}")
+    return False
+
+def story_job():
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"\n{'-'*50}\n[{now}] Story Loft Attitude\n{'-'*50}")
+    product = get_story_candidate()
+    if not product:
+        print("Pas de candidat story.")
+        return
+    print(f"Candidat story: {product['nom']} | {product['prix']}")
+    image_url = product["image_url"]
+    if not image_url:
+        images = get_product_images(product["url"])
+        image_url = images[0] if images else None
+    if not image_url:
+        print("Pas d'image pour ce produit.")
+        return
+    try:
+        r = requests.get(image_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        if r.status_code != 200:
+            print("Echec telechargement image story.")
+            return
+        story_img = crop_to_916(r.content)
+        story_img = add_story_overlay(story_img, product)
+        public_url = upload_to_imgbb(story_img)
+    except Exception as e:
+        print(f"Erreur preparation image story: {e}")
+        return
+    if not public_url:
+        print("Echec upload image story.")
+        return
+    ok = publish_instagram_story(public_url)
+    if ok:
+        mark_as_storied(product["url"])
+    print(f"Story: {'OK' if ok else 'ECHEC'}")
 
 def get_next_product():
     try:
@@ -509,9 +768,14 @@ if __name__ == "__main__":
     print(f"IMGBB:       {'OK' if IMGBB_KEY else 'MANQUANT'}")
     print(f"Token IG:    {'OK' if IG_TOKEN else 'MANQUANT'}")
     print(f"Claude:      {'OK' if CLAUDE_KEY else 'MANQUANT'}")
-    print("Publication planifiee a 09:00\n")
+    print("Publication feed planifiee a 09:00")
+    print("Stories planifiees a 11:00, 14:00, 17:00, 20:00\n")
     daily_job()
     schedule.every().day.at("09:00").do(daily_job)
+    schedule.every().day.at("11:00").do(story_job)
+    schedule.every().day.at("14:00").do(story_job)
+    schedule.every().day.at("17:00").do(story_job)
+    schedule.every().day.at("20:00").do(story_job)
     while True:
         schedule.run_pending()
         time.sleep(60)
