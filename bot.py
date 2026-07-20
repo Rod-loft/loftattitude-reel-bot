@@ -474,35 +474,41 @@ def get_story_candidate():
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         candidates = []
         for brand_url in STORY_BRAND_URLS:
-            url = brand_url + ("&" if "?" in brand_url else "?") + "resultsPerPage=99999"
-            r = requests.get(url, headers=headers, timeout=15)
-            soup = BeautifulSoup(r.text, "html.parser")
-            products = soup.select(".product-miniature")
-            print(f"  {brand_url.split('/')[-1]}: {len(products)} produits")
-            for product in products:
-                name_el  = product.select_one(".product-title")
-                price_el = product.select_one(".price")
-                img_el   = product.select_one("img")
-                link_el  = product.select_one("a")
-                if not price_el:
-                    continue
-                prix_val = parse_price(price_el.text.strip())
-                if prix_val < STORY_MIN_PRICE:
-                    continue
-                href = link_el.get("href", "") if link_el else ""
-                product_url = href if href.startswith("http") else "https://www.loftattitude.com" + href
-                if not product_url or already_in_story(product_url):
-                    continue
-                img_url = img_el.get("data-src") or img_el.get("src") if img_el else ""
-                if img_url and img_url.startswith("/"):
-                    img_url = "https://www.loftattitude.com" + img_url
-                candidates.append({
-                    "nom":       name_el.text.strip()  if name_el  else "Produit design",
-                    "prix":      price_el.text.strip() if price_el else "",
-                    "prix_val":  prix_val,
-                    "image_url": img_url,
-                    "url":       product_url,
-                })
+            base_url = brand_url.split("?")[0]
+            for page in range(1, 6):
+                url = base_url if page == 1 else f"{base_url}?page={page}"
+                r = requests.get(url, headers=headers, timeout=15)
+                soup = BeautifulSoup(r.text, "html.parser")
+                products = soup.select(".product-miniature")
+                print(f"  {base_url.split('/')[-1]} p{page}: {len(products)} produits")
+                if not products:
+                    break
+                for product in products:
+                    name_el  = product.select_one(".product-title")
+                    price_el = product.select_one(".price")
+                    img_el   = product.select_one("img")
+                    link_el  = product.select_one("a")
+                    if not price_el:
+                        continue
+                    prix_val = parse_price(price_el.text.strip())
+                    if prix_val < STORY_MIN_PRICE:
+                        continue
+                    href = link_el.get("href", "") if link_el else ""
+                    product_url = href if href.startswith("http") else "https://www.loftattitude.com" + href
+                    if not product_url or already_in_story(product_url):
+                        continue
+                    img_url = img_el.get("data-src") or img_el.get("src") if img_el else ""
+                    if img_url and img_url.startswith("/"):
+                        img_url = "https://www.loftattitude.com" + img_url
+                    candidates.append({
+                        "nom":       name_el.text.strip()  if name_el  else "Produit design",
+                        "prix":      price_el.text.strip() if price_el else "",
+                        "prix_val":  prix_val,
+                        "image_url": img_url,
+                        "url":       product_url,
+                    })
+                if len(products) < 12:
+                    break
         if not candidates:
             print("Aucun candidat story disponible (tout deja publie ou <100€).")
             return None
