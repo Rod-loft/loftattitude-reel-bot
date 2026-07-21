@@ -488,12 +488,13 @@ def get_story_candidate():
                     break
                 for product in products:
                     name_el  = product.select_one(".product-title")
-                    price_el = product.select_one(".price")
-                    img_el   = product.select_one("img")
                     link_el  = product.select_one("a")
-                    if not price_el:
+                    img_el   = product.select_one("img")
+                    text_block = product.get_text(" ", strip=True)
+                    price_match = re.search(r"(\d[\d\s\u00a0\u202f]{0,6}[,.]\d{2})\s*€", text_block)
+                    if not price_match:
                         continue
-                    prix_val = parse_price(price_el.text.strip())
+                    prix_val = parse_price(price_match.group(1))
                     if prix_val < STORY_MIN_PRICE:
                         continue
                     href = link_el.get("href", "") if link_el else ""
@@ -504,8 +505,8 @@ def get_story_candidate():
                     if img_url and img_url.startswith("/"):
                         img_url = "https://www.loftattitude.com" + img_url
                     candidates.append({
-                        "nom":       name_el.text.strip()  if name_el  else "Produit design",
-                        "prix":      price_el.text.strip() if price_el else "",
+                        "nom":       name_el.text.strip() if name_el else "Produit design",
+                        "prix":      price_match.group(1).strip() + " €",
                         "prix_val":  prix_val,
                         "image_url": img_url,
                         "url":       product_url,
