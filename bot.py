@@ -1,4 +1,4 @@
-import os, time, requests, schedule, anthropic, json, base64, io
+import os, time, requests, schedule, anthropic, json, base64, io, re
 import numpy as np
 from datetime import datetime
 from bs4 import BeautifulSoup
@@ -462,9 +462,12 @@ def select_best_images(images, max_images=5):
 
 def parse_price(text):
     try:
-        cleaned = text.replace("\xa0", " ").replace("€", "").strip()
-        cleaned = cleaned.replace(" ", "").replace(",", ".")
-        return float(cleaned)
+        match = re.search(r"(\d[\d\s\u00a0\u202f]*)[,.](\d{2})", text)
+        if match:
+            integer_part = re.sub(r"\D", "", match.group(1))
+            return float(f"{integer_part}.{match.group(2)}")
+        digits = re.sub(r"\D", "", text)
+        return float(digits) if digits else 0.0
     except Exception:
         return 0.0
 
@@ -777,6 +780,9 @@ if __name__ == "__main__":
     print("Publication feed planifiee a 09:00")
     print("Stories planifiees a 11:00, 14:00, 17:00, 20:00\n")
     daily_job()
+    if os.environ.get("TEST_STORY_NOW") == "1":
+        print("\nTEST_STORY_NOW=1 detecte -> declenchement story manuel\n")
+        story_job()
     schedule.every().day.at("09:00").do(daily_job)
     schedule.every().day.at("11:00").do(story_job)
     schedule.every().day.at("14:00").do(story_job)
