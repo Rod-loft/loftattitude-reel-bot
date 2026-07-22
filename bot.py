@@ -28,7 +28,18 @@ STORY_SLIDE_COUNT = 4
 STORY_SLIDE_DURATION = 3.5
 STORY_VIDEO_DIR = "/tmp/story_videos"
 STORY_SLIDES_DIR = "/tmp/story_slides"
-MUSIC_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "story_music.mp3")
+def _resolve_music_path():
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(base_dir, "assets", "story_music.mp3"),
+        os.path.join(base_dir, "story_music.mp3"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return candidates[0]
+
+MUSIC_PATH = _resolve_music_path()
 os.makedirs(STORY_VIDEO_DIR, exist_ok=True)
 os.makedirs(STORY_SLIDES_DIR, exist_ok=True)
 
