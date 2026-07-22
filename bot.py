@@ -361,6 +361,7 @@ def _load_story_font(size):
 def add_story_overlay(image_bytes, product):
     """
     Ajoute un bandeau en bas de la story : nom du produit, prix, et appel a l'action.
+    Tout est proportionnel a la hauteur de l'image pour rester lisible quelle que soit la resolution.
     Meta ne permet pas de sticker lien cliquable via l'API -> texte incruste a la place.
     """
     try:
@@ -369,23 +370,26 @@ def add_story_overlay(image_bytes, product):
         overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
 
-        band_h = 300
-        for i in range(band_h):
-            alpha = int(190 * (i / band_h))
-            draw.line([(0, h - band_h + i), (w, h - band_h + i)], fill=(0, 0, 0, alpha))
-        draw.rectangle([0, h - 40, w, h], fill=(0, 0, 0, 210))
+        band_top = h - int(h * 0.40)
+        solid_top = h - int(h * 0.26)
+        for y in range(band_top, solid_top):
+            ratio = (y - band_top) / max(1, (solid_top - band_top))
+            alpha = int(200 * ratio)
+            draw.line([(0, y), (w, y)], fill=(0, 0, 0, alpha))
+        draw.rectangle([0, solid_top, w, h], fill=(0, 0, 0, 225))
 
-        name_font  = _load_story_font(52)
-        price_font = _load_story_font(64)
-        cta_font   = _load_story_font(38)
+        name_font  = _load_story_font(max(28, int(h * 0.032)))
+        price_font = _load_story_font(max(34, int(h * 0.040)))
+        cta_font   = _load_story_font(max(20, int(h * 0.023)))
 
         name = product.get("nom", "")[:60]
         prix = product.get("prix", "")
+        margin_x = int(w * 0.07)
 
-        draw.text((50, h - 250), name, font=name_font, fill=(255, 255, 255, 255))
+        draw.text((margin_x, h - int(h * 0.195)), name, font=name_font, fill=(255, 255, 255, 255))
         if prix:
-            draw.text((50, h - 185), prix, font=price_font, fill=(255, 255, 255, 255))
-        draw.text((50, h - 95), "Decouvrir -> loftattitude.com", font=cta_font, fill=(230, 230, 230, 255))
+            draw.text((margin_x, h - int(h * 0.140)), prix, font=price_font, fill=(255, 255, 255, 255))
+        draw.text((margin_x, h - int(h * 0.070)), "Decouvrir -> loftattitude.com", font=cta_font, fill=(225, 225, 225, 255))
 
         final_img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
         output = io.BytesIO()
