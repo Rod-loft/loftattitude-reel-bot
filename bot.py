@@ -279,7 +279,7 @@ def crop_to_916(image_bytes):
         if w <= 0 or h <= 0:
             return image_bytes
 
-        target_w, target_h = 1080, 1920
+        target_w, target_h = 720, 1280
         target_ratio = target_w / target_h
 
         fond_blanc = is_white_background(img)
@@ -575,22 +575,29 @@ def build_story_slideshow(products):
             print(f"Erreur slide {i}: {e}")
     if not clips:
         return None
-    video = concatenate_videoclips(clips, method="compose")
-    if os.path.exists(MUSIC_PATH):
-        try:
-            audio = AudioFileClip(MUSIC_PATH)
-            duration = min(video.duration, audio.duration)
-            audio = audio.subclipped(0, duration)
-            audio = audio.with_effects([afx.AudioFadeOut(1.0)])
-            video = video.with_duration(duration).with_audio(audio)
-        except Exception as e:
-            print(f"Erreur ajout musique: {e}")
-    else:
-        print(f"Musique introuvable a {MUSIC_PATH}, video sans son.")
-    filename = f"story_{int(time.time())}.mp4"
-    output_path = os.path.join(STORY_VIDEO_DIR, filename)
-    video.write_videofile(output_path, fps=24, codec="libx264", audio_codec="aac", logger=None)
-    return filename
+    try:
+        video = concatenate_videoclips(clips, method="compose")
+        if os.path.exists(MUSIC_PATH):
+            try:
+                audio = AudioFileClip(MUSIC_PATH)
+                duration = min(video.duration, audio.duration)
+                audio = audio.subclipped(0, duration)
+                audio = audio.with_effects([afx.AudioFadeOut(1.0)])
+                video = video.with_duration(duration).with_audio(audio)
+            except Exception as e:
+                print(f"Erreur ajout musique: {e}")
+        else:
+            print(f"Musique introuvable a {MUSIC_PATH}, video sans son.")
+        filename = f"story_{int(time.time())}.mp4"
+        output_path = os.path.join(STORY_VIDEO_DIR, filename)
+        video.write_videofile(
+            output_path, fps=15, codec="libx264", audio_codec="aac",
+            preset="ultrafast", threads=1, bitrate="1500k", logger=None,
+        )
+        return filename
+    except Exception as e:
+        print(f"Erreur encodage video story: {e}")
+        return None
 
 def publish_instagram_story_video(video_url):
     if not video_url or not IG_TOKEN:
@@ -629,29 +636,34 @@ def publish_instagram_story_video(video_url):
     return False
 
 def story_job():
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n{'-'*50}\n[{now}] Story Loft Attitude\n{'-'*50}")
-    products = get_story_candidates(STORY_SLIDE_COUNT)
-    if not products:
-        print("Pas de candidats story.")
-        return
-    for p in products:
-        print(f"Slide: {p['nom']} | {p['prix']}")
-    filename = build_story_slideshow(products)
-    if not filename:
-        print("Echec generation video story.")
-        return
-    base_url = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
-    if not base_url:
-        print("PUBLIC_BASE_URL manquant, impossible d'heberger la video.")
-        return
-    video_url = f"{base_url}/video/{filename}"
-    print(f"Video hebergee: {video_url}")
-    ok = publish_instagram_story_video(video_url)
-    if ok:
+    """Ne doit jamais lever d'exception : un echec ici ne doit pas arreter le bot
+    ni empecher les publications feed planifiees."""
+    try:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"\n{'-'*50}\n[{now}] Story Loft Attitude\n{'-'*50}")
+        products = get_story_candidates(STORY_SLIDE_COUNT)
+        if not products:
+            print("Pas de candidats story.")
+            return
         for p in products:
-            mark_as_storied(p["url"])
-    print(f"Story: {'OK' if ok else 'ECHEC'}")
+            print(f"Slide: {p['nom']} | {p['prix']}")
+        filename = build_story_slideshow(products)
+        if not filename:
+            print("Echec generation video story.")
+            return
+        base_url = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+        if not base_url:
+            print("PUBLIC_BASE_URL manquant, impossible d'heberger la video.")
+            return
+        video_url = f"{base_url}/video/{filename}"
+        print(f"Video hebergee: {video_url}")
+        ok = publish_instagram_story_video(video_url)
+        if ok:
+            for p in products:
+                mark_as_storied(p["url"])
+        print(f"Story: {'OK' if ok else 'ECHEC'}")
+    except Exception as e:
+        print(f"Erreur story_job (ignoree, le bot continue): {e}")
 
 def get_next_product():
     try:
@@ -857,7 +869,10 @@ if __name__ == "__main__":
     print("Stories planifiees a 11:00, 14:00, 17:00, 20:00\n")
     threading.Thread(target=start_flask_server, daemon=True).start()
     print(f"Serveur video demarre sur le port {os.environ.get('PORT', 8080)}\n")
-    daily_job()
+    try:
+        daily_job()
+    except Exception as e:
+        print(f"Erreur daily_job au demarrage (ignoree): {e}")
     if os.environ.get("TEST_STORY_NOW") == "1":
         print("\nTEST_STORY_NOW=1 detecte -> declenchement story manuel\n")
         story_job()
@@ -867,5 +882,8 @@ if __name__ == "__main__":
     schedule.every().day.at("17:00").do(story_job)
     schedule.every().day.at("20:00").do(story_job)
     while True:
-        schedule.run_pending()
+        try:
+            schedule.run_pending()
+        except Exception as e:
+            print(f"Erreur boucle planificateur (ignoree): {e}")
         time.sleep(60)
