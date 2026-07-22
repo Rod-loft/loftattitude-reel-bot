@@ -581,7 +581,7 @@ def build_story_slideshow(products):
             if r.status_code != 200:
                 continue
             slide_bytes = crop_to_916(r.content)
-            slide_bytes = add_story_overlay(slide_bytes, product)
+            # Plus d'overlay texte/ombre : uniquement l'image du produit
             slide_path = os.path.join(STORY_SLIDES_DIR, f"slide_{i}_{int(time.time())}.jpg")
             with open(slide_path, "wb") as f:
                 f.write(slide_bytes)
