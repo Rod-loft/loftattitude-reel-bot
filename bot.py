@@ -26,6 +26,7 @@ STORY_BRAND_URLS = [
 STORY_MIN_PRICE = 100.0
 STORY_SLIDE_COUNT = 4
 STORY_SLIDE_DURATION = 3.5
+REEL_SLIDE_DURATION = 2.5
 STORY_VIDEO_DIR = "/tmp/story_videos"
 STORY_SLIDES_DIR = "/tmp/story_slides"
 def _resolve_music_path():
@@ -873,6 +874,155 @@ def daily_job():
         mark_as_published(product["url"])
     print(f"\nResultat: Instagram={'OK' if ig_ok else 'ECHEC'} | Facebook={'OK' if fb_ok else 'ECHEC'}")
 
+def build_reel_video(image_urls):
+    """Construit un Reel (9:16) a partir des photos du produit, avec la musique d'ambiance, sans overlay."""
+    from moviepy import ImageClip, concatenate_videoclips, AudioFileClip, afx
+    clips = []
+    for i, image_url in enumerate(image_urls):
+        try:
+            r = requests.get(image_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+            if r.status_code != 200:
+                continue
+            slide_bytes = crop_to_916(r.content)
+            slide_path = os.path.join(STORY_SLIDES_DIR, f"reel_{i}_{int(time.time())}.jpg")
+            with open(slide_path, "wb") as f:
+                f.write(slide_bytes)
+            clips.append(ImageClip(slide_path).with_duration(REEL_SLIDE_DURATION))
+        except Exception as e:
+            print(f"Erreur slide reel {i}: {e}")
+    if not clips:
+        return None
+    try:
+        video = concatenate_videoclips(clips, method="compose")
+        if os.path.exists(MUSIC_PATH):
+            try:
+                audio = AudioFileClip(MUSIC_PATH)
+                duration = min(video.duration, audio.duration)
+                audio = audio.subclipped(0, duration)
+                audio = audio.with_effects([afx.AudioFadeOut(1.0)])
+                video = video.with_duration(duration).with_audio(audio)
+            except Exception as e:
+                print(f"Erreur ajout musique reel: {e}")
+        else:
+            print(f"Musique introuvable a {MUSIC_PATH}, reel sans son.")
+        filename = f"reel_{int(time.time())}.mp4"
+        output_path = os.path.join(STORY_VIDEO_DIR, filename)
+        video.write_videofile(
+            output_path, fps=15, codec="libx264", audio_codec="aac",
+            preset="ultrafast", threads=1, bitrate="1500k", logger=None,
+        )
+        return filename
+    except Exception as e:
+        print(f"Erreur encodage reel: {e}")
+        return None
+
+def publish_instagram_reel(video_url, caption):
+    if not video_url or not IG_TOKEN:
+        return False
+    r1 = requests.post(f"{IG_BASE}/{IG_USER_ID}/media", data={
+        "video_url": video_url, "media_type": "REELS", "caption": caption, "access_token": IG_TOKEN,
+    })
+    result1 = r1.json()
+    if "id" not in result1:
+        print(f"Erreur creation reel: {result1}")
+        return False
+    creation_id = result1["id"]
+    for attempt in range(20):
+        time.sleep(10)
+        status_r = requests.get(f"{IG_BASE}/{creation_id}", params={
+            "fields": "status_code", "access_token": IG_TOKEN,
+        })
+        status = status_r.json().get("status_code")
+        print(f"Statut reel: {status} (tentative {attempt + 1})")
+        if status == "FINISHED":
+            break
+        if status == "ERROR":
+            print("Erreur traitement reel Meta.")
+            return False
+    else:
+        print("Timeout traitement reel.")
+        return False
+    r2 = requests.post(f"{IG_BASE}/{IG_USER_ID}/media_publish", data={
+        "creation_id": creation_id, "access_token": IG_TOKEN,
+    })
+    result2 = r2.json()
+    if "id" in result2:
+        print(f"Reel Instagram OK ! ID: {result2['id']}")
+        return True
+    print(f"Erreur publication reel: {result2}")
+    return False
+
+def publish_facebook_reel(video_url, caption):
+    if not FB_PAGE_ID or not FB_TOKEN:
+        print("Facebook non configure - FB_PAGE_ID ou FB_PAGE_TOKEN manquant")
+        return False
+    try:
+        r = requests.post(f"{FB_BASE}/{FB_PAGE_ID}/videos", data={
+            "file_url": video_url, "description": caption, "access_token": FB_TOKEN,
+        })
+        result = r.json()
+        if "id" in result:
+            print(f"Facebook video OK ! ID: {result['id']}")
+            return True
+        print(f"Erreur Facebook video: {result}")
+        return False
+    except Exception as e:
+        print(f"Erreur Facebook video: {e}")
+        return False
+
+def reel_job():
+    """Ne doit jamais lever d'exception : un echec ici ne doit pas arreter le bot."""
+    try:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"\n{'='*50}\n[{now}] Debut Reel Loft Attitude\n{'='*50}")
+        product = get_next_product()
+        if not product:
+            print("Pas de nouveau produit pour le reel aujourd'hui.")
+            return
+        print(f"Produit reel: {product['nom']} | {product['prix']}")
+        all_images = get_product_images(product["url"]) if product["url"] else []
+        if not all_images and product["image_url"]:
+            all_images = [product["image_url"]]
+        best_images = select_best_images(all_images, max_images=6)
+        if not best_images:
+            print("Pas d'images pour le reel.")
+            return
+        filename = build_reel_video(best_images)
+        if not filename:
+            print("Echec generation video reel.")
+            return
+        base_url = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+        if not base_url:
+            print("PUBLIC_BASE_URL manquant, impossible d'heberger le reel.")
+            return
+        video_url = f"{base_url}/video/{filename}"
+        print(f"Reel heberge: {video_url}")
+        caption = generate_caption(product)
+        print("\n--- INSTAGRAM REEL ---")
+        ig_ok = publish_instagram_reel(video_url, caption)
+        print("Instagram: OK" if ig_ok else "Instagram: ECHEC")
+        print("\n--- FACEBOOK REEL ---")
+        fb_ok = publish_facebook_reel(video_url, caption)
+        print("Facebook: OK" if fb_ok else "Facebook: ECHEC")
+        if ig_ok:
+            mark_as_published(product["url"])
+        print(f"\nResultat reel: Instagram={'OK' if ig_ok else 'ECHEC'} | Facebook={'OK' if fb_ok else 'ECHEC'}")
+    except Exception as e:
+        print(f"Erreur reel_job (ignoree, le bot continue): {e}")
+
+def daily_dispatch_job():
+    """Alterne carrousel un jour, Reel le lendemain (base sur le jour de l'annee, stable aux redemarrages)."""
+    try:
+        day_of_year = datetime.now().timetuple().tm_yday
+        if day_of_year % 2 == 0:
+            print("Jour pair -> publication carrousel")
+            daily_job()
+        else:
+            print("Jour impair -> publication Reel")
+            reel_job()
+    except Exception as e:
+        print(f"Erreur dispatch quotidien (ignoree): {e}")
+
 if __name__ == "__main__":
     print("Bot Loft Attitude v15 - Lifestyle sans rognage / Detouré rognage+centrage")
     print(f"IG_USER_ID:  {IG_USER_ID}")
@@ -880,18 +1030,21 @@ if __name__ == "__main__":
     print(f"IMGBB:       {'OK' if IMGBB_KEY else 'MANQUANT'}")
     print(f"Token IG:    {'OK' if IG_TOKEN else 'MANQUANT'}")
     print(f"Claude:      {'OK' if CLAUDE_KEY else 'MANQUANT'}")
-    print("Publication feed planifiee a 09:00")
+    print("Publication feed/reel planifiee a 09:00 (alternee un jour sur deux)")
     print("Stories planifiees a 11:00, 14:00, 17:00, 20:00\n")
     threading.Thread(target=start_flask_server, daemon=True).start()
     print(f"Serveur video demarre sur le port {os.environ.get('PORT', 8080)}\n")
     try:
-        daily_job()
+        daily_dispatch_job()
     except Exception as e:
-        print(f"Erreur daily_job au demarrage (ignoree): {e}")
+        print(f"Erreur dispatch au demarrage (ignoree): {e}")
     if os.environ.get("TEST_STORY_NOW") == "1":
         print("\nTEST_STORY_NOW=1 detecte -> declenchement story manuel\n")
         story_job()
-    schedule.every().day.at("09:00").do(daily_job)
+    if os.environ.get("TEST_REEL_NOW") == "1":
+        print("\nTEST_REEL_NOW=1 detecte -> declenchement reel manuel\n")
+        reel_job()
+    schedule.every().day.at("09:00").do(daily_dispatch_job)
     schedule.every().day.at("11:00").do(story_job)
     schedule.every().day.at("14:00").do(story_job)
     schedule.every().day.at("17:00").do(story_job)
