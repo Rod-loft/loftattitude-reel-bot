@@ -1,8 +1,9 @@
-import os, time, requests, schedule, anthropic, json, base64, io, re
+import os, time, requests, schedule, anthropic, json, base64, io, re, random, threading
 import numpy as np
 from datetime import datetime
 from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont
+from flask import Flask, send_from_directory
 
 IG_USER_ID   = os.environ.get("IG_USER_ID", "17841400937343787")
 IG_TOKEN     = os.environ.get("IG_ACCESS_TOKEN", "")
@@ -23,6 +24,29 @@ STORY_BRAND_URLS = [
     "https://www.loftattitude.com/fr/brand/62-villeroy-boch",
 ]
 STORY_MIN_PRICE = 100.0
+STORY_SLIDE_COUNT = 4
+STORY_SLIDE_DURATION = 3.5
+STORY_VIDEO_DIR = "/tmp/story_videos"
+STORY_SLIDES_DIR = "/tmp/story_slides"
+MUSIC_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "story_music.mp3")
+os.makedirs(STORY_VIDEO_DIR, exist_ok=True)
+os.makedirs(STORY_SLIDES_DIR, exist_ok=True)
+
+# ─── SERVEUR FLASK : HEBERGEMENT DES VIDEOS STORIES ────────────────────────────
+
+flask_app = Flask(__name__)
+
+@flask_app.route("/video/<path:filename>")
+def serve_story_video(filename):
+    return send_from_directory(STORY_VIDEO_DIR, filename)
+
+@flask_app.route("/health")
+def health_check():
+    return "OK"
+
+def start_flask_server():
+    port = int(os.environ.get("PORT", 8080))
+    flask_app.run(host="0.0.0.0", port=port)
 
 # ─── HISTORIQUE ───────────────────────────────────────────────────────────────
 
@@ -471,8 +495,9 @@ def parse_price(text):
     except Exception:
         return 0.0
 
-def get_story_candidate():
-    """Parcourt les 3 pages marques ciblees, filtre les produits >100€ pas encore en story."""
+def get_story_candidates(n=STORY_SLIDE_COUNT):
+    """Parcourt les 3 pages marques ciblees, filtre les produits >100€ pas encore en story,
+    et renvoie un mix de n produits differents (marques melangees)."""
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         candidates = []
@@ -504,6 +529,8 @@ def get_story_candidate():
                     img_url = img_el.get("data-src") or img_el.get("src") if img_el else ""
                     if img_url and img_url.startswith("/"):
                         img_url = "https://www.loftattitude.com" + img_url
+                    if not img_url:
+                        continue
                     candidates.append({
                         "nom":       name_el.text.strip() if name_el else "Produit design",
                         "prix":      price_match.group(1).strip() + " €",
@@ -515,67 +542,115 @@ def get_story_candidate():
                     break
         if not candidates:
             print("Aucun candidat story disponible (tout deja publie ou <100€).")
-            return None
-        # Priorite au prix le plus eleve pour varier des posts feed
+            return []
+        # On privilegie les prix eleves tout en melangeant les marques
         candidates.sort(key=lambda p: p["prix_val"], reverse=True)
-        return candidates[0]
+        top_pool = candidates[:max(n * 4, 12)]
+        random.shuffle(top_pool)
+        return top_pool[:n]
     except Exception as e:
         print(f"Erreur scraping stories: {e}")
-        return None
+        return []
 
-def publish_instagram_story(image_url):
-    if not image_url or not IG_TOKEN:
+def build_story_slideshow(products):
+    """Construit une video verticale (9:16) enchainant les photos des produits,
+    avec overlay nom/prix par slide et musique d'ambiance."""
+    from moviepy import ImageClip, concatenate_videoclips, AudioFileClip, afx
+    clips = []
+    for i, product in enumerate(products):
+        image_url = product.get("image_url")
+        if not image_url:
+            continue
+        try:
+            r = requests.get(image_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+            if r.status_code != 200:
+                continue
+            slide_bytes = crop_to_916(r.content)
+            slide_bytes = add_story_overlay(slide_bytes, product)
+            slide_path = os.path.join(STORY_SLIDES_DIR, f"slide_{i}_{int(time.time())}.jpg")
+            with open(slide_path, "wb") as f:
+                f.write(slide_bytes)
+            clips.append(ImageClip(slide_path).with_duration(STORY_SLIDE_DURATION))
+        except Exception as e:
+            print(f"Erreur slide {i}: {e}")
+    if not clips:
+        return None
+    video = concatenate_videoclips(clips, method="compose")
+    if os.path.exists(MUSIC_PATH):
+        try:
+            audio = AudioFileClip(MUSIC_PATH)
+            duration = min(video.duration, audio.duration)
+            audio = audio.subclipped(0, duration)
+            audio = audio.with_effects([afx.AudioFadeOut(1.0)])
+            video = video.with_duration(duration).with_audio(audio)
+        except Exception as e:
+            print(f"Erreur ajout musique: {e}")
+    else:
+        print(f"Musique introuvable a {MUSIC_PATH}, video sans son.")
+    filename = f"story_{int(time.time())}.mp4"
+    output_path = os.path.join(STORY_VIDEO_DIR, filename)
+    video.write_videofile(output_path, fps=24, codec="libx264", audio_codec="aac", logger=None)
+    return filename
+
+def publish_instagram_story_video(video_url):
+    if not video_url or not IG_TOKEN:
         return False
     r1 = requests.post(f"{IG_BASE}/{IG_USER_ID}/media", data={
-        "image_url": image_url, "media_type": "STORIES", "access_token": IG_TOKEN,
+        "video_url": video_url, "media_type": "STORIES", "access_token": IG_TOKEN,
     })
     result1 = r1.json()
     if "id" not in result1:
-        print(f"Erreur creation story: {result1}")
+        print(f"Erreur creation story video: {result1}")
         return False
-    time.sleep(15)
+    creation_id = result1["id"]
+    for attempt in range(20):
+        time.sleep(10)
+        status_r = requests.get(f"{IG_BASE}/{creation_id}", params={
+            "fields": "status_code", "access_token": IG_TOKEN,
+        })
+        status = status_r.json().get("status_code")
+        print(f"Statut video story: {status} (tentative {attempt + 1})")
+        if status == "FINISHED":
+            break
+        if status == "ERROR":
+            print("Erreur traitement video Meta.")
+            return False
+    else:
+        print("Timeout traitement video story.")
+        return False
     r2 = requests.post(f"{IG_BASE}/{IG_USER_ID}/media_publish", data={
-        "creation_id": result1["id"], "access_token": IG_TOKEN,
+        "creation_id": creation_id, "access_token": IG_TOKEN,
     })
     result2 = r2.json()
     if "id" in result2:
-        print(f"Story Instagram OK ! ID: {result2['id']}")
+        print(f"Story video Instagram OK ! ID: {result2['id']}")
         return True
-    print(f"Erreur publication story: {result2}")
+    print(f"Erreur publication story video: {result2}")
     return False
 
 def story_job():
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n{'-'*50}\n[{now}] Story Loft Attitude\n{'-'*50}")
-    product = get_story_candidate()
-    if not product:
-        print("Pas de candidat story.")
+    products = get_story_candidates(STORY_SLIDE_COUNT)
+    if not products:
+        print("Pas de candidats story.")
         return
-    print(f"Candidat story: {product['nom']} | {product['prix']}")
-    image_url = product["image_url"]
-    if not image_url:
-        images = get_product_images(product["url"])
-        image_url = images[0] if images else None
-    if not image_url:
-        print("Pas d'image pour ce produit.")
+    for p in products:
+        print(f"Slide: {p['nom']} | {p['prix']}")
+    filename = build_story_slideshow(products)
+    if not filename:
+        print("Echec generation video story.")
         return
-    try:
-        r = requests.get(image_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-        if r.status_code != 200:
-            print("Echec telechargement image story.")
-            return
-        story_img = crop_to_916(r.content)
-        story_img = add_story_overlay(story_img, product)
-        public_url = upload_to_imgbb(story_img)
-    except Exception as e:
-        print(f"Erreur preparation image story: {e}")
+    base_url = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+    if not base_url:
+        print("PUBLIC_BASE_URL manquant, impossible d'heberger la video.")
         return
-    if not public_url:
-        print("Echec upload image story.")
-        return
-    ok = publish_instagram_story(public_url)
+    video_url = f"{base_url}/video/{filename}"
+    print(f"Video hebergee: {video_url}")
+    ok = publish_instagram_story_video(video_url)
     if ok:
-        mark_as_storied(product["url"])
+        for p in products:
+            mark_as_storied(p["url"])
     print(f"Story: {'OK' if ok else 'ECHEC'}")
 
 def get_next_product():
@@ -780,6 +855,8 @@ if __name__ == "__main__":
     print(f"Claude:      {'OK' if CLAUDE_KEY else 'MANQUANT'}")
     print("Publication feed planifiee a 09:00")
     print("Stories planifiees a 11:00, 14:00, 17:00, 20:00\n")
+    threading.Thread(target=start_flask_server, daemon=True).start()
+    print(f"Serveur video demarre sur le port {os.environ.get('PORT', 8080)}\n")
     daily_job()
     if os.environ.get("TEST_STORY_NOW") == "1":
         print("\nTEST_STORY_NOW=1 detecte -> declenchement story manuel\n")
