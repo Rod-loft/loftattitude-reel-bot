@@ -13,8 +13,9 @@ FB_PAGE_ID   = os.environ.get("FB_PAGE_ID", "100063636817093")
 FB_TOKEN     = os.environ.get("FB_PAGE_TOKEN", "")
 IG_BASE      = "https://graph.instagram.com/v21.0"
 FB_BASE      = "https://graph.facebook.com/v21.0"
-HISTORY_FILE = "/tmp/published_products.json"
-STORY_HISTORY_FILE = os.path.join(os.path.dirname(HISTORY_FILE), "published_stories.json")
+DATA_DIR = "/data" if os.path.isdir("/data") and os.access("/data", os.W_OK) else "/tmp"
+HISTORY_FILE = os.path.join(DATA_DIR, "published_products.json")
+STORY_HISTORY_FILE = os.path.join(DATA_DIR, "published_stories.json")
 
 # ─── STORIES : MARQUES CIBLEES ─────────────────────────────────────────────────
 
@@ -692,36 +693,45 @@ def story_job():
 def get_next_product():
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        r = requests.get("https://www.loftattitude.com/fr/nouveaux-produits", headers=headers, timeout=15)
-        soup = BeautifulSoup(r.text, "html.parser")
-        products = soup.select(".product-miniature")
-        if not products:
-            print("Aucun produit trouve")
-            return None
-        print(f"{len(products)} produits trouves")
-        for product in products:
-            name_el  = product.select_one(".product-title")
-            price_el = product.select_one(".price")
-            img_el   = product.select_one("img")
-            link_el  = product.select_one("a")
-            img_url = img_el.get("data-src") or img_el.get("src") if img_el else ""
-            if img_url and img_url.startswith("/"):
-                img_url = "https://www.loftattitude.com" + img_url
-            href = link_el.get("href", "") if link_el else ""
-            product_url = href if href.startswith("http") else "https://www.loftattitude.com" + href
-            if not product_url:
-                continue
-            if already_published(product_url):
-                print(f"Deja publie: {product_url}")
-                continue
-            print(f"Nouveau produit: {name_el.text.strip() if name_el else 'Inconnu'}")
-            return {
-                "nom":       name_el.text.strip()  if name_el  else "Nouveau produit design",
-                "prix":      price_el.text.strip() if price_el else "",
-                "image_url": img_url,
-                "url":       product_url,
-            }
-        print("Tous les produits ont deja ete publies !")
+        base_url = "https://www.loftattitude.com/fr/nouveaux-produits"
+        for page in range(1, 6):
+            url = base_url if page == 1 else f"{base_url}?page={page}"
+            r = requests.get(url, headers=headers, timeout=15)
+            soup = BeautifulSoup(r.text, "html.parser")
+            products = soup.select(".product-miniature")
+            if not products:
+                break
+            print(f"Page {page}: {len(products)} produits trouves")
+            for product in products:
+                name_el = product.select_one(".product-title")
+                img_el  = product.select_one("img")
+                link_el = product.select_one("a")
+                text_block = product.get_text(" ", strip=True)
+                price_match = re.search(r"(\d[\d\s\u00a0\u202f]{0,6}[,.]\d{2})\s*€", text_block)
+                if not price_match:
+                    continue
+                prix_val = parse_price(price_match.group(1))
+                if prix_val < STORY_MIN_PRICE:
+                    continue
+                img_url = img_el.get("data-src") or img_el.get("src") if img_el else ""
+                if img_url and img_url.startswith("/"):
+                    img_url = "https://www.loftattitude.com" + img_url
+                href = link_el.get("href", "") if link_el else ""
+                product_url = href if href.startswith("http") else "https://www.loftattitude.com" + href
+                if not product_url:
+                    continue
+                if already_published(product_url):
+                    continue
+                print(f"Nouveau produit: {name_el.text.strip() if name_el else 'Inconnu'} | {price_match.group(1).strip()} €")
+                return {
+                    "nom":       name_el.text.strip() if name_el else "Nouveau produit design",
+                    "prix":      price_match.group(1).strip() + " €",
+                    "image_url": img_url,
+                    "url":       product_url,
+                }
+            if len(products) < 12:
+                break
+        print("Aucun produit disponible (tout deja publie ou <100€).")
         return None
     except Exception as e:
         print(f"Erreur scraping: {e}")
@@ -1033,6 +1043,7 @@ def daily_dispatch_job():
 
 if __name__ == "__main__":
     print("Bot Loft Attitude v15 - Lifestyle sans rognage / Detouré rognage+centrage")
+    print(f"Stockage historique: {DATA_DIR} {'(persistant)' if DATA_DIR == '/data' else '(NON persistant - volume /data absent)'}")
     print(f"IG_USER_ID:  {IG_USER_ID}")
     print(f"FB_PAGE_ID:  {FB_PAGE_ID}")
     print(f"IMGBB:       {'OK' if IMGBB_KEY else 'MANQUANT'}")
