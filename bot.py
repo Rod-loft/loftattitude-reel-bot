@@ -541,7 +541,7 @@ def get_story_candidates(n=STORY_SLIDE_COUNT):
                     link_el  = product.select_one("a")
                     img_el   = product.select_one("img")
                     text_block = product.get_text(" ", strip=True)
-                    price_match = re.search(r"(\d[\d\s\u00a0\u202f]{0,6}[,.]\d{2})\s*€", text_block)
+                    price_match = re.search(r"(\d[\d\u00a0\u202f]{0,4}[,.]\d{2})\s*€", text_block)
                     if not price_match:
                         continue
                     prix_val = parse_price(price_match.group(1))
@@ -707,7 +707,7 @@ def get_next_product():
                 img_el  = product.select_one("img")
                 link_el = product.select_one("a")
                 text_block = product.get_text(" ", strip=True)
-                price_match = re.search(r"(\d[\d\s\u00a0\u202f]{0,6}[,.]\d{2})\s*€", text_block)
+                price_match = re.search(r"(\d[\d\u00a0\u202f]{0,4}[,.]\d{2})\s*€", text_block)
                 if not price_match:
                     continue
                 prix_val = parse_price(price_match.group(1))
