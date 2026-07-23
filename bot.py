@@ -281,9 +281,10 @@ def crop_to_45(image_bytes):
 
 def crop_to_916(image_bytes):
     """
-    Recadre en 9:16 (1080x1920) pour les Stories Instagram :
-    - Lifestyle (fond colore) : recadrage centre, perte minimale
-    - Detouré (fond blanc)   : produit entier centré sur fond blanc
+    Recadre en 9:16 pour les Stories/Reels :
+    - Detouré (fond blanc) : produit entier centré sur fond blanc
+    - Lifestyle : recadrage centré SEULEMENT si la perte reste faible (<=18%),
+      sinon on bascule en mode "contain" (fond blanc) pour ne jamais couper le produit
     """
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
@@ -291,7 +292,7 @@ def crop_to_916(image_bytes):
         if w <= 0 or h <= 0:
             return image_bytes
 
-        target_w, target_h = 720, 1280
+        target_w, target_h = 900, 1600
         target_ratio = target_w / target_h
 
         fond_blanc = is_white_background(img)
@@ -306,9 +307,22 @@ def crop_to_916(image_bytes):
             return image_bytes
         src_ratio = w / h
 
-        if fond_blanc:
+        use_contain = fond_blanc
+        if not use_contain:
+            # Estime la perte si on recadre pour remplir le cadre (mode "cover")
+            cover_scale = max(target_w / w, target_h / h)
+            covered_w, covered_h = w * cover_scale, h * cover_scale
+            overflow = max(
+                (covered_w - target_w) / covered_w,
+                (covered_h - target_h) / covered_h,
+            )
+            if overflow > 0.18:
+                use_contain = True
+
+        if use_contain:
             canvas = Image.new("RGB", (target_w, target_h), (255, 255, 255))
-            margin_x, margin_y = 80, 260
+            margin_x = int(target_w * 0.07) if fond_blanc else 0
+            margin_y = int(target_h * 0.20) if fond_blanc else 0
             max_w = target_w - margin_x * 2
             max_h = target_h - margin_y * 2
             scale = min(max_w / w, max_h / h)
@@ -321,26 +335,20 @@ def crop_to_916(image_bytes):
             img_final = canvas
         else:
             if src_ratio > target_ratio:
-                # Image plus large que 9:16 : on comble en hauteur, on coupe les cotes
                 new_h = target_h
                 new_w = max(1, int(new_h * src_ratio))
                 img_resized = img.resize((new_w, new_h), Image.LANCZOS)
                 x = (new_w - target_w) // 2
                 img_final = img_resized.crop((x, 0, x + target_w, target_h))
             else:
-                # Image plus haute/étroite que 9:16 : on comble en largeur, on coupe haut/bas
                 new_w = target_w
                 new_h = max(1, int(new_w / src_ratio)) if src_ratio > 0 else target_h
                 img_resized = img.resize((new_w, new_h), Image.LANCZOS)
                 y = max(0, (new_h - target_h) // 2)
                 img_final = img_resized.crop((0, y, target_w, min(y + target_h, new_h)))
-                if img_final.size != (target_w, target_h):
-                    canvas = Image.new("RGB", (target_w, target_h), (255, 255, 255))
-                    canvas.paste(img_final, (0, (target_h - img_final.height) // 2))
-                    img_final = canvas
 
         output = io.BytesIO()
-        img_final.save(output, format="JPEG", quality=92)
+        img_final.save(output, format="JPEG", quality=94)
         return output.getvalue()
     except Exception as e:
         print(f"Erreur recadrage story: {e}")
@@ -608,7 +616,7 @@ def build_story_slideshow(products):
         output_path = os.path.join(STORY_VIDEO_DIR, filename)
         video.write_videofile(
             output_path, fps=15, codec="libx264", audio_codec="aac",
-            preset="ultrafast", threads=1, bitrate="1500k", logger=None,
+            preset="ultrafast", threads=1, bitrate="3000k", logger=None,
         )
         return filename
     except Exception as e:
@@ -909,7 +917,7 @@ def build_reel_video(image_urls):
         output_path = os.path.join(STORY_VIDEO_DIR, filename)
         video.write_videofile(
             output_path, fps=15, codec="libx264", audio_codec="aac",
-            preset="ultrafast", threads=1, bitrate="1500k", logger=None,
+            preset="ultrafast", threads=1, bitrate="3000k", logger=None,
         )
         return filename
     except Exception as e:
