@@ -25,8 +25,8 @@ STORY_BRAND_URLS = [
     "https://www.loftattitude.com/fr/brand/62-villeroy-boch",
 ]
 STORY_MIN_PRICE = 100.0
-STORY_SLIDE_COUNT = 4
-STORY_SLIDE_DURATION = 3.5
+STORY_SLIDE_COUNT = 6
+STORY_SLIDE_DURATION = 2.2
 REEL_SLIDE_DURATION = 2.5
 STORY_VIDEO_DIR = "/tmp/story_videos"
 STORY_SLIDES_DIR = "/tmp/story_slides"
