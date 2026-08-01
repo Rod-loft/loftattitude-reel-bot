@@ -28,6 +28,7 @@ STORY_BRAND_URLS = [
 STORY_MIN_PRICE = 100.0
 STORY_SLIDE_COUNT = 6
 STORY_SLIDE_DURATION = 2.2
+STORY_MAX_AI_GENERATIONS = 2
 REEL_SLIDE_DURATION = 2.5
 STORY_VIDEO_DIR = "/tmp/story_videos"
 STORY_SLIDES_DIR = "/tmp/story_slides"
@@ -782,6 +783,22 @@ def story_job():
             return
         for p in products:
             print(f"Slide: {p['nom']} | {p['prix']}")
+
+        ai_budget = STORY_MAX_AI_GENERATIONS
+        for p in products:
+            if ai_budget <= 0 or not OPENAI_KEY:
+                break
+            try:
+                is_lifestyle, _score, _entier = is_lifestyle_image(p["image_url"])
+            except Exception as e:
+                print(f"Erreur check lifestyle story: {e}")
+                continue
+            if not is_lifestyle:
+                ai_url = generate_ai_lifestyle_image(p["image_url"], p["nom"])
+                if ai_url:
+                    p["image_url"] = ai_url
+                    ai_budget -= 1
+
         filename = build_story_slideshow(products)
         if not filename:
             print("Echec generation video story.")
