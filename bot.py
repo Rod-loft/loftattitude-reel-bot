@@ -2,13 +2,14 @@ import os, time, requests, schedule, anthropic, json, base64, io, re, random, th
 import numpy as np
 from datetime import datetime
 from bs4 import BeautifulSoup
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from flask import Flask, send_from_directory
 
 IG_USER_ID   = os.environ.get("IG_USER_ID", "17841400937343787")
 IG_TOKEN     = os.environ.get("IG_ACCESS_TOKEN", "")
 CLAUDE_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
 IMGBB_KEY    = os.environ.get("IMGBB_API_KEY", "")
+OPENAI_KEY   = os.environ.get("OPENAI_API_KEY", "")
 FB_PAGE_ID   = os.environ.get("FB_PAGE_ID", "100063636817093")
 FB_TOKEN     = os.environ.get("FB_PAGE_TOKEN", "")
 IG_BASE      = "https://graph.instagram.com/v21.0"
@@ -409,6 +410,105 @@ def add_story_overlay(image_bytes, product):
         print(f"Erreur overlay story: {e}")
         return image_bytes
 
+def generate_scene_background(product_name):
+    """Genere un decor d'interieur via OpenAI (le produit n'est PAS demande dans l'image,
+    il sera colle par dessus ensuite pour garantir un rendu produit fidele a l'original)."""
+    if not OPENAI_KEY:
+        return None
+    prompt = (
+        f"Photographie d'architecture d'interieur professionnelle, style loft/industriel/contemporain haut de gamme, "
+        f"pour mettre en valeur un meuble ou objet de decoration de type '{product_name}'. "
+        f"Interieur epure, lumiere naturelle douce, sol et mur flous en arriere-plan, ambiance chaleureuse et minimaliste. "
+        f"IMPORTANT: la piece doit etre VIDE, sans aucun meuble ni objet au premier plan, "
+        f"seulement un decor/arriere-plan sur lequel un produit sera ajoute ensuite. Format vertical."
+    )
+    try:
+        r = requests.post(
+            "https://api.openai.com/v1/images/generations",
+            headers={"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"},
+            json={"model": "gpt-image-1", "prompt": prompt, "size": "1024x1536", "quality": "medium"},
+            timeout=90,
+        )
+        result = r.json()
+        b64 = result.get("data", [{}])[0].get("b64_json")
+        if not b64:
+            print(f"Erreur generation decor IA: {result}")
+            return None
+        return base64.b64decode(b64)
+    except Exception as e:
+        print(f"Erreur appel OpenAI: {e}")
+        return None
+
+def compose_product_on_scene(product_image_bytes, background_bytes, target_w=900, target_h=1600):
+    """Colle le VRAI detourage produit (pixels d'origine, jamais modifies) sur le decor genere,
+    avec une ombre portee douce."""
+    try:
+        bg = Image.open(io.BytesIO(background_bytes)).convert("RGB")
+        bg = bg.resize((target_w, target_h), Image.LANCZOS)
+
+        product = Image.open(io.BytesIO(product_image_bytes)).convert("RGB")
+        product = trim_white_borders(product)
+        pw, ph = product.size
+        if pw <= 0 or ph <= 0:
+            return None
+
+        max_w = int(target_w * 0.62)
+        max_h = int(target_h * 0.52)
+        scale = min(max_w / pw, max_h / ph)
+        new_w, new_h = max(1, int(pw * scale)), max(1, int(ph * scale))
+        product_resized = product.resize((new_w, new_h), Image.LANCZOS)
+
+        # Masque = tout ce qui n'est pas presque blanc, pour un collage propre sans halo
+        gray = product_resized.convert("L")
+        mask = gray.point(lambda p: 255 if p < 245 else 0)
+        mask = mask.filter(ImageFilter.MaxFilter(3))
+
+        pos_x = (target_w - new_w) // 2
+        pos_y = int(target_h * 0.60) - new_h // 2
+
+        # Ombre portee douce sous le produit
+        shadow = Image.new("RGBA", bg.size, (0, 0, 0, 0))
+        shadow_draw = ImageDraw.Draw(shadow)
+        shadow_draw.ellipse(
+            [pos_x + new_w * 0.10, pos_y + new_h - int(new_h * 0.06),
+             pos_x + new_w * 0.90, pos_y + new_h + int(new_h * 0.10)],
+            fill=(0, 0, 0, 110),
+        )
+        shadow = shadow.filter(ImageFilter.GaussianBlur(18))
+        composed = Image.alpha_composite(bg.convert("RGBA"), shadow).convert("RGB")
+
+        composed.paste(product_resized, (pos_x, pos_y), mask)
+
+        output = io.BytesIO()
+        composed.save(output, format="JPEG", quality=94)
+        return output.getvalue()
+    except Exception as e:
+        print(f"Erreur composition mise en scene: {e}")
+        return None
+
+def generate_ai_lifestyle_image(product_image_url, product_name):
+    """Orchestration complete : decor IA + collage du vrai produit + upload, renvoie une URL publique."""
+    if not OPENAI_KEY:
+        return None
+    try:
+        r = requests.get(product_image_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        if r.status_code != 200:
+            return None
+        product_bytes = r.content
+        background_bytes = generate_scene_background(product_name)
+        if not background_bytes:
+            return None
+        composed = compose_product_on_scene(product_bytes, background_bytes)
+        if not composed:
+            return None
+        public_url = upload_to_imgbb(composed)
+        if public_url:
+            print(f"Mise en scene IA generee: {public_url}")
+        return public_url
+    except Exception as e:
+        print(f"Erreur generation mise en scene IA: {e}")
+        return None
+
 def upload_to_imgbb(image_bytes):
     try:
         img_b64 = base64.b64encode(image_bytes).decode("utf-8")
@@ -491,7 +591,7 @@ def is_lifestyle_image(image_url):
         print(f"Erreur analyse image: {e}")
         return False, 0, True
 
-def select_best_images(images, max_images=5):
+def select_best_images(images, max_images=5, product_name=""):
     if not images:
         return []
     print(f"Analyse IA de {min(len(images), 8)} images...")
@@ -507,6 +607,16 @@ def select_best_images(images, max_images=5):
     best = [item["url"] for item in scored[:max_images]]
     lifestyle_count = sum(1 for item in scored[:max_images] if item["lifestyle"])
     print(f"Selection: {len(best)} images ({lifestyle_count} lifestyle)")
+
+    if lifestyle_count == 0 and OPENAI_KEY:
+        detoure_candidates = [item for item in scored if item["entier"]]
+        if detoure_candidates:
+            source = detoure_candidates[0]["url"]
+            print("Aucune photo lifestyle -> generation d'une mise en scene IA...")
+            ai_url = generate_ai_lifestyle_image(source, product_name)
+            if ai_url:
+                best = [ai_url] + best[:max_images - 1]
+
     return best
 
 def parse_price(text):
@@ -866,7 +976,7 @@ def daily_job():
     all_images = get_product_images(product["url"]) if product["url"] else []
     if not all_images and product["image_url"]:
         all_images = [product["image_url"]]
-    best_images = select_best_images(all_images, max_images=5)
+    best_images = select_best_images(all_images, max_images=5, product_name=product["nom"])
     if not best_images:
         print("Pas d'images.")
         return
@@ -1001,7 +1111,7 @@ def reel_job():
         all_images = get_product_images(product["url"]) if product["url"] else []
         if not all_images and product["image_url"]:
             all_images = [product["image_url"]]
-        best_images = select_best_images(all_images, max_images=6)
+        best_images = select_best_images(all_images, max_images=6, product_name=product["nom"])
         if not best_images:
             print("Pas d'images pour le reel.")
             return
