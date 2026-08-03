@@ -637,6 +637,7 @@ def get_story_candidates(n=STORY_SLIDE_COUNT):
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         candidates = []
+        seen_urls = set()
         for brand_url in STORY_BRAND_URLS:
             base_url = brand_url.split("?")[0]
             for page in range(1, 6):
@@ -660,7 +661,7 @@ def get_story_candidates(n=STORY_SLIDE_COUNT):
                         continue
                     href = link_el.get("href", "") if link_el else ""
                     product_url = href if href.startswith("http") else "https://www.loftattitude.com" + href
-                    if not product_url or already_in_story(product_url):
+                    if not product_url or already_in_story(product_url) or product_url in seen_urls:
                         continue
                     img_url = img_el.get("data-src") or img_el.get("src") if img_el else ""
                     if img_url and img_url.startswith("/"):
@@ -674,6 +675,7 @@ def get_story_candidates(n=STORY_SLIDE_COUNT):
                         "image_url": img_url,
                         "url":       product_url,
                     })
+                    seen_urls.add(product_url)
                 if len(products) < 12:
                     break
         if not candidates:
@@ -783,6 +785,7 @@ def story_job():
             return
         for p in products:
             print(f"Slide: {p['nom']} | {p['prix']}")
+            mark_as_storied(p["url"])
 
         ai_budget = STORY_MAX_AI_GENERATIONS
         for p in products:
@@ -810,9 +813,6 @@ def story_job():
         video_url = f"{base_url}/video/{filename}"
         print(f"Video hebergee: {video_url}")
         ok = publish_instagram_story_video(video_url)
-        if ok:
-            for p in products:
-                mark_as_storied(p["url"])
         print(f"Story: {'OK' if ok else 'ECHEC'}")
     except Exception as e:
         print(f"Erreur story_job (ignoree, le bot continue): {e}")
