@@ -645,6 +645,12 @@ def get_story_candidates(n=STORY_SLIDE_COUNT):
                 r = requests.get(url, headers=headers, timeout=15)
                 soup = BeautifulSoup(r.text, "html.parser")
                 products = soup.select(".product-miniature")
+                if not products and page == 1:
+                    print(f"  {base_url.split('/')[-1]} p1: 0 produits, nouvelle tentative dans 5s...")
+                    time.sleep(5)
+                    r = requests.get(url, headers=headers, timeout=15)
+                    soup = BeautifulSoup(r.text, "html.parser")
+                    products = soup.select(".product-miniature")
                 print(f"  {base_url.split('/')[-1]} p{page}: {len(products)} produits")
                 if not products:
                     break
@@ -685,7 +691,7 @@ def get_story_candidates(n=STORY_SLIDE_COUNT):
         candidates.sort(key=lambda p: p["prix_val"], reverse=True)
         top_pool = candidates[:max(n * 4, 12)]
         random.shuffle(top_pool)
-        return top_pool[:n]
+        return top_pool
     except Exception as e:
         print(f"Erreur scraping stories: {e}")
         return []
@@ -779,13 +785,33 @@ def story_job():
     try:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"\n{'-'*50}\n[{now}] Story Loft Attitude\n{'-'*50}")
-        products = get_story_candidates(STORY_SLIDE_COUNT)
-        if not products:
+        print(f"Historique stories: {len(load_story_history())} produits deja publies")
+        pool = get_story_candidates(STORY_SLIDE_COUNT)
+        if not pool:
             print("Pas de candidats story.")
             return
-        for p in products:
+
+        products = []
+        for p in pool:
+            if len(products) >= STORY_SLIDE_COUNT:
+                break
+            try:
+                r = requests.get(p["image_url"], headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+                if r.status_code != 200 or not r.content:
+                    print(f"Image indisponible, produit ignore: {p['nom']}")
+                    continue
+            except Exception as e:
+                print(f"Erreur telechargement image candidate ({p['nom']}): {e}")
+                continue
             print(f"Slide: {p['nom']} | {p['prix']}")
             mark_as_storied(p["url"])
+            products.append(p)
+
+        if not products:
+            print("Aucune image de candidat n'a pu etre telechargee.")
+            return
+        if len(products) < STORY_SLIDE_COUNT:
+            print(f"Seulement {len(products)}/{STORY_SLIDE_COUNT} slides valides trouvees.")
 
         ai_budget = STORY_MAX_AI_GENERATIONS
         for p in products:
@@ -826,6 +852,12 @@ def get_next_product():
             r = requests.get(url, headers=headers, timeout=15)
             soup = BeautifulSoup(r.text, "html.parser")
             products = soup.select(".product-miniature")
+            if not products and page == 1:
+                print("Page 1: 0 produits, nouvelle tentative dans 5s...")
+                time.sleep(5)
+                r = requests.get(url, headers=headers, timeout=15)
+                soup = BeautifulSoup(r.text, "html.parser")
+                products = soup.select(".product-miniature")
             if not products:
                 break
             print(f"Page {page}: {len(products)} produits trouves")
