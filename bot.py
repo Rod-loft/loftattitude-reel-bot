@@ -592,7 +592,7 @@ def is_lifestyle_image(image_url):
         client = anthropic.Anthropic(api_key=CLAUDE_KEY)
         r = requests.get(image_url, timeout=10)
         if r.status_code != 200:
-            return False, 0
+            return False, 0, True
         img_b64 = base64.b64encode(r.content).decode("utf-8")
         content_type = r.headers.get("content-type", "image/jpeg")
         msg = client.messages.create(
