@@ -628,16 +628,6 @@ def select_best_images(images, max_images=5, product_name=""):
     best = [item["url"] for item in scored[:max_images]]
     lifestyle_count = sum(1 for item in scored[:max_images] if item["lifestyle"])
     print(f"Selection: {len(best)} images ({lifestyle_count} lifestyle)")
-
-    if lifestyle_count == 0 and OPENAI_KEY:
-        detoure_candidates = [item for item in scored if item["entier"]]
-        if detoure_candidates:
-            source = detoure_candidates[0]["url"]
-            print("Aucune photo lifestyle -> generation d'une mise en scene IA...")
-            ai_url = generate_ai_lifestyle_image(source, product_name)
-            if ai_url:
-                best = [ai_url] + best[:max_images - 1]
-
     return best
 
 def parse_price(text):
@@ -833,21 +823,6 @@ def story_job():
             return
         if len(products) < STORY_SLIDE_COUNT:
             print(f"Seulement {len(products)}/{STORY_SLIDE_COUNT} slides valides trouvees.")
-
-        ai_budget = STORY_MAX_AI_GENERATIONS
-        for p in products:
-            if ai_budget <= 0 or not OPENAI_KEY:
-                break
-            try:
-                is_lifestyle, _score, _entier = is_lifestyle_image(p["image_url"])
-            except Exception as e:
-                print(f"Erreur check lifestyle story: {e}")
-                continue
-            if not is_lifestyle:
-                ai_url = generate_ai_lifestyle_image(p["image_url"], p["nom"])
-                if ai_url:
-                    p["image_url"] = ai_url
-                    ai_budget -= 1
 
         filename = build_story_slideshow(products)
         if not filename:
