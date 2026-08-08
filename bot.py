@@ -492,7 +492,7 @@ def generate_ai_lifestyle_image(product_image_url, product_name):
     if not OPENAI_KEY:
         return None
     try:
-        r = requests.get(product_image_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        r = get_scrape_session().get(product_image_url, timeout=15)
         if r.status_code != 200:
             return None
         product_bytes = r.content
@@ -529,7 +529,7 @@ def upload_to_imgbb(image_bytes):
 
 def process_image(image_url):
     try:
-        r = requests.get(image_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        r = get_scrape_session().get(image_url, timeout=15)
         if r.status_code != 200:
             return None
         return upload_to_imgbb(crop_to_45(r.content))
@@ -539,10 +539,30 @@ def process_image(image_url):
 
 # ─── SCRAPING ─────────────────────────────────────────────────────────────────
 
+BOT_BYPASS_KEY = os.environ.get("BOT_BYPASS_KEY", "")
+_scrape_session = None
+
+def get_scrape_session():
+    """Session partagee avec des en-tetes proches d'un vrai navigateur, persistance
+    des cookies, et un en-tete secret pour la regle de contournement Cloudflare."""
+    global _scrape_session
+    if _scrape_session is None:
+        _scrape_session = requests.Session()
+        _scrape_session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+        })
+        if BOT_BYPASS_KEY:
+            _scrape_session.headers["X-Loft-Bot-Key"] = BOT_BYPASS_KEY
+    return _scrape_session
+
 def get_product_images(product_url):
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        r = requests.get(product_url, headers=headers, timeout=15)
+        session = get_scrape_session()
+        r = session.get(product_url, timeout=15)
         soup = BeautifulSoup(r.text, "html.parser")
         images = []
         selectors = [
@@ -635,20 +655,21 @@ def get_story_candidates(n=STORY_SLIDE_COUNT):
     """Parcourt les 3 pages marques ciblees, filtre les produits >100€ pas encore en story,
     et renvoie un mix de n produits differents (marques melangees)."""
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        session = get_scrape_session()
         candidates = []
         seen_urls = set()
         for brand_url in STORY_BRAND_URLS:
             base_url = brand_url.split("?")[0]
             for page in range(1, 6):
                 url = base_url if page == 1 else f"{base_url}?page={page}"
-                r = requests.get(url, headers=headers, timeout=15)
+                time.sleep(random.uniform(1.0, 2.5))
+                r = session.get(url, timeout=15)
                 soup = BeautifulSoup(r.text, "html.parser")
                 products = soup.select(".product-miniature")
                 if not products and page == 1:
                     print(f"  {base_url.split('/')[-1]} p1: 0 produits, nouvelle tentative dans 5s...")
                     time.sleep(5)
-                    r = requests.get(url, headers=headers, timeout=15)
+                    r = session.get(url, timeout=15)
                     soup = BeautifulSoup(r.text, "html.parser")
                     products = soup.select(".product-miniature")
                 print(f"  {base_url.split('/')[-1]} p{page}: {len(products)} produits")
@@ -706,7 +727,7 @@ def build_story_slideshow(products):
         if not image_url:
             continue
         try:
-            r = requests.get(image_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+            r = get_scrape_session().get(image_url, timeout=15)
             if r.status_code != 200:
                 continue
             slide_bytes = crop_to_916(r.content)
@@ -796,7 +817,7 @@ def story_job():
             if len(products) >= STORY_SLIDE_COUNT:
                 break
             try:
-                r = requests.get(p["image_url"], headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+                r = get_scrape_session().get(p["image_url"], timeout=15)
                 if r.status_code != 200 or not r.content:
                     print(f"Image indisponible, produit ignore: {p['nom']}")
                     continue
@@ -845,17 +866,18 @@ def story_job():
 
 def get_next_product():
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        session = get_scrape_session()
         base_url = "https://www.loftattitude.com/fr/nouveaux-produits"
         for page in range(1, 6):
             url = base_url if page == 1 else f"{base_url}?page={page}"
-            r = requests.get(url, headers=headers, timeout=15)
+            time.sleep(random.uniform(1.0, 2.5))
+            r = session.get(url, timeout=15)
             soup = BeautifulSoup(r.text, "html.parser")
             products = soup.select(".product-miniature")
             if not products and page == 1:
                 print("Page 1: 0 produits, nouvelle tentative dans 5s...")
                 time.sleep(5)
-                r = requests.get(url, headers=headers, timeout=15)
+                r = session.get(url, timeout=15)
                 soup = BeautifulSoup(r.text, "html.parser")
                 products = soup.select(".product-miniature")
             if not products:
@@ -1057,7 +1079,7 @@ def build_reel_video(image_urls):
     clips = []
     for i, image_url in enumerate(image_urls):
         try:
-            r = requests.get(image_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+            r = get_scrape_session().get(image_url, timeout=15)
             if r.status_code != 200:
                 continue
             slide_bytes = crop_to_916(r.content)
