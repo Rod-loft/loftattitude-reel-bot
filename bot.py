@@ -695,6 +695,7 @@ def get_story_candidates(n=STORY_SLIDE_COUNT):
                         "prix_val":  prix_val,
                         "image_url": img_url,
                         "url":       product_url,
+                        "marque":    base_url.rstrip("/").split("/")[-1],
                     })
                     seen_urls.add(product_url)
                 if len(products) < 12:
@@ -702,11 +703,36 @@ def get_story_candidates(n=STORY_SLIDE_COUNT):
         if not candidates:
             print("Aucun candidat story disponible (tout deja publie ou <100€).")
             return []
-        # On privilegie les prix eleves tout en melangeant les marques
-        candidates.sort(key=lambda p: p["prix_val"], reverse=True)
-        top_pool = candidates[:max(n * 4, 12)]
-        random.shuffle(top_pool)
-        return top_pool
+        # Un produit par marque en priorite, pour ne jamais laisser une seule marque
+        # monopoliser la story, puis on complete avec un pool melange (prix eleves prioritaires)
+        by_brand = {}
+        for c in candidates:
+            by_brand.setdefault(c["marque"], []).append(c)
+        for brand_list in by_brand.values():
+            random.shuffle(brand_list)
+
+        selected = []
+        selected_urls = set()
+        brands_order = list(by_brand.keys())
+        random.shuffle(brands_order)
+        for brand in brands_order:
+            if len(selected) >= n:
+                break
+            pick = by_brand[brand][0]
+            selected.append(pick)
+            selected_urls.add(pick["url"])
+
+        remaining = [c for c in candidates if c["url"] not in selected_urls]
+        remaining.sort(key=lambda p: p["prix_val"], reverse=True)
+        remaining = remaining[:max((n - len(selected)) * 4, 12)]
+        random.shuffle(remaining)
+        for c in remaining:
+            if len(selected) >= n:
+                break
+            selected.append(c)
+
+        random.shuffle(selected)
+        return selected
     except Exception as e:
         print(f"Erreur scraping stories: {e}")
         return []
