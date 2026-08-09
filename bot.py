@@ -1206,7 +1206,7 @@ if __name__ == "__main__":
     print(f"Token IG:    {'OK' if IG_TOKEN else 'MANQUANT'}")
     print(f"Claude:      {'OK' if CLAUDE_KEY else 'MANQUANT'}")
     print("Publication feed/reel planifiee a 09:00 (alternee un jour sur deux)")
-    print("Stories planifiees a 11:00, 14:00, 17:00, 20:00\n")
+    print("Stories planifiees a 12:30, 19:30\n")
     threading.Thread(target=start_flask_server, daemon=True).start()
     print(f"Serveur video demarre sur le port {os.environ.get('PORT', 8080)}\n")
     try:
@@ -1220,10 +1220,8 @@ if __name__ == "__main__":
         print("\nTEST_REEL_NOW=1 detecte -> declenchement reel manuel\n")
         reel_job()
     schedule.every().day.at("09:00").do(daily_dispatch_job)
-    schedule.every().day.at("11:00").do(story_job)
-    schedule.every().day.at("14:00").do(story_job)
-    schedule.every().day.at("17:00").do(story_job)
-    schedule.every().day.at("20:00").do(story_job)
+    schedule.every().day.at("12:30").do(story_job)
+    schedule.every().day.at("19:30").do(story_job)
     while True:
         try:
             schedule.run_pending()
