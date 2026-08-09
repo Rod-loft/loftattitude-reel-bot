@@ -24,10 +24,14 @@ STORY_BRAND_URLS = [
     "https://www.loftattitude.com/fr/brand/18-camino-a-casa",
     "https://www.loftattitude.com/fr/brand/7-kare-design",
     "https://www.loftattitude.com/fr/brand/62-villeroy-boch",
+    "https://www.loftattitude.com/fr/brand/9-blomus",
+    "https://www.loftattitude.com/fr/brand/15-sompex",
+    "https://www.loftattitude.com/fr/brand/66-richmond-interiors",
+    "https://www.loftattitude.com/fr/brand/55-socadis",
 ]
 STORY_MIN_PRICE = 100.0
-STORY_SLIDE_COUNT = 6
-STORY_SLIDE_DURATION = 2.2
+STORY_SLIDE_COUNT = 8
+STORY_SLIDE_DURATION = 1.7
 STORY_MAX_AI_GENERATIONS = 2
 REEL_SLIDE_DURATION = 2.5
 STORY_VIDEO_DIR = "/tmp/story_videos"
@@ -650,7 +654,7 @@ def get_story_candidates(n=STORY_SLIDE_COUNT):
         seen_urls = set()
         for brand_url in STORY_BRAND_URLS:
             base_url = brand_url.split("?")[0]
-            for page in range(1, 6):
+            for page in range(1, 21):
                 url = base_url if page == 1 else f"{base_url}?page={page}"
                 time.sleep(random.uniform(1.0, 2.5))
                 r = session.get(url, timeout=15)
@@ -843,7 +847,7 @@ def get_next_product():
     try:
         session = get_scrape_session()
         base_url = "https://www.loftattitude.com/fr/nouveaux-produits"
-        for page in range(1, 6):
+        for page in range(1, 21):
             url = base_url if page == 1 else f"{base_url}?page={page}"
             time.sleep(random.uniform(1.0, 2.5))
             r = session.get(url, timeout=15)
