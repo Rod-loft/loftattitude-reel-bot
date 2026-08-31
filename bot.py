@@ -1,6 +1,15 @@
 import os, time, requests, schedule, anthropic, json, base64, io, re, random, threading
 import numpy as np
 from datetime import datetime
+try:
+    from zoneinfo import ZoneInfo
+    PARIS_TZ = ZoneInfo("Europe/Paris")
+except ImportError:
+    try:
+        import pytz
+        PARIS_TZ = pytz.timezone("Europe/Paris")
+    except ImportError:
+        PARIS_TZ = None
 from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from flask import Flask, send_from_directory
@@ -820,52 +829,136 @@ def publish_instagram_story_video(video_url):
     print(f"Erreur publication story video: {result2}")
     return False
 
+def find_lifestyle_image_for_product(product):
+    """
+    Cherche la meilleure photo lifestyle pour un produit donne.
+    1. Scrape toutes les images de la fiche produit
+    2. Analyse chaque image avec Claude Vision
+    3. Retourne la meilleure photo lifestyle (score le plus eleve)
+    4. Si aucune photo lifestyle trouvee, retourne None (jamais de detouree)
+    """
+    # Recupere toutes les images de la fiche produit
+    all_images = get_product_images(product["url"])
+    if not all_images:
+        # Fallback : essaie l'image miniature du listing
+        all_images = [product["image_url"]] if product.get("image_url") else []
+    if not all_images:
+        print(f"  Aucune image trouvee pour: {product['nom']}")
+        return None
+
+    print(f"  Analyse de {min(len(all_images), 6)} images pour trouver une photo lifestyle...")
+    best_url = None
+    best_score = -1
+
+    for img_url in all_images[:6]:  # Max 6 images analysees par produit
+        try:
+            is_lifestyle, score, produit_entier = is_lifestyle_image(img_url)
+            print(f"    {img_url[-50:]} -> lifestyle={is_lifestyle}, score={score}, entier={produit_entier}")
+            if is_lifestyle and score > best_score:
+                best_score = score
+                best_url = img_url
+        except Exception as e:
+            print(f"    Erreur analyse image: {e}")
+            continue
+
+    if best_url:
+        print(f"  Meilleure photo lifestyle trouvee (score={best_score}): {best_url[-60:]}")
+    else:
+        print(f"  Aucune photo lifestyle trouvee pour: {product['nom']} — produit ignore")
+    return best_url
+
+def publish_instagram_story_image(image_url):
+    """Publie une image unique en Story Instagram."""
+    if not image_url or not IG_TOKEN:
+        return False
+    r1 = requests.post(f"{IG_BASE}/{IG_USER_ID}/media", data={
+        "image_url":  image_url,
+        "media_type": "STORIES",
+        "access_token": IG_TOKEN,
+    })
+    result1 = r1.json()
+    if "id" not in result1:
+        print(f"Erreur creation story image: {result1}")
+        return False
+    time.sleep(15)
+    r2 = requests.post(f"{IG_BASE}/{IG_USER_ID}/media_publish", data={
+        "creation_id":  result1["id"],
+        "access_token": IG_TOKEN,
+    })
+    result2 = r2.json()
+    if "id" in result2:
+        print(f"Story image Instagram OK ! ID: {result2['id']}")
+        return True
+    print(f"Erreur publication story image: {result2}")
+    return False
+
 def story_job():
-    """Ne doit jamais lever d'exception : un echec ici ne doit pas arreter le bot
-    ni empecher les publications feed planifiees."""
+    """
+    Publie UNE seule Story Instagram avec UNE photo lifestyle.
+    Regles :
+    - 1 photo par Story, jamais de diaporama ou montage
+    - Uniquement des photos lifestyle (interieur, ambiance) — jamais de fond blanc
+    - Si aucune photo lifestyle dispo pour un produit, on essaie le suivant
+    - Lien produit incruste dans l'overlay
+    - Ne leve jamais d'exception pour ne pas bloquer le bot
+    """
     try:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"\n{'-'*50}\n[{now}] Story Loft Attitude\n{'-'*50}")
+        print(f"\n{'-'*50}\n[{now}] Story Loft Attitude (1 photo lifestyle)\n{'-'*50}")
         print(f"Historique stories: {len(load_story_history())} produits deja publies")
-        pool = get_story_candidates(STORY_SLIDE_COUNT)
+
+        # Recupere un pool de candidats (produits >100€ pas encore en story)
+        pool = get_story_candidates(20)  # Large pool pour avoir le choix
         if not pool:
-            print("Pas de candidats story.")
+            print("Pas de candidats story disponibles.")
             return
 
-        products = []
-        for p in pool:
-            if len(products) >= STORY_SLIDE_COUNT:
-                break
-            try:
-                r = get_scrape_session().get(p["image_url"], timeout=15)
-                if r.status_code != 200 or not r.content:
-                    print(f"Image indisponible, produit ignore: {p['nom']}")
-                    continue
-            except Exception as e:
-                print(f"Erreur telechargement image candidate ({p['nom']}): {e}")
+        # Cherche le premier produit avec une vraie photo lifestyle
+        selected_product = None
+        selected_image_url = None
+
+        for candidate in pool:
+            print(f"\n-> Candidat: {candidate['nom']} | {candidate['prix']}")
+            lifestyle_url = find_lifestyle_image_for_product(candidate)
+            if lifestyle_url:
+                selected_product = candidate
+                selected_image_url = lifestyle_url
+                break  # On a trouve notre produit, on s'arrete
+            else:
+                print(f"  Passe au produit suivant.")
                 continue
-            print(f"Slide: {p['nom']} | {p['prix']}")
-            mark_as_storied(p["url"])
-            products.append(p)
 
-        if not products:
-            print("Aucune image de candidat n'a pu etre telechargee.")
+        if not selected_product or not selected_image_url:
+            print("Aucun produit avec photo lifestyle disponible pour cette story.")
             return
-        if len(products) < STORY_SLIDE_COUNT:
-            print(f"Seulement {len(products)}/{STORY_SLIDE_COUNT} slides valides trouvees.")
 
-        filename = build_story_slideshow(products)
-        if not filename:
-            print("Echec generation video story.")
+        print(f"\nProduit retenu: {selected_product['nom']}")
+        print(f"Photo lifestyle: {selected_image_url[-70:]}")
+
+        # Prepare l'image en format 9:16 avec overlay
+        try:
+            r = get_scrape_session().get(selected_image_url, timeout=15)
+            if r.status_code != 200 or not r.content:
+                print("Echec telechargement image story.")
+                return
+            story_img = crop_to_916(r.content)
+            story_img = add_story_overlay(story_img, selected_product)
+        except Exception as e:
+            print(f"Erreur preparation image story: {e}")
             return
-        base_url = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
-        if not base_url:
-            print("PUBLIC_BASE_URL manquant, impossible d'heberger la video.")
+
+        # Upload sur imgbb
+        public_url = upload_to_imgbb(story_img)
+        if not public_url:
+            print("Echec upload image story.")
             return
-        video_url = f"{base_url}/video/{filename}"
-        print(f"Video hebergee: {video_url}")
-        ok = publish_instagram_story_video(video_url)
+
+        # Publie la Story
+        ok = publish_instagram_story_image(public_url)
+        if ok:
+            mark_as_storied(selected_product["url"])
         print(f"Story: {'OK' if ok else 'ECHEC'}")
+
     except Exception as e:
         print(f"Erreur story_job (ignoree, le bot continue): {e}")
 
@@ -1249,9 +1342,21 @@ if __name__ == "__main__":
     if os.environ.get("TEST_REEL_NOW") == "1":
         print("\nTEST_REEL_NOW=1 detecte -> declenchement reel manuel\n")
         reel_job()
-    schedule.every().day.at("09:00").do(daily_dispatch_job)
-    schedule.every().day.at("12:30").do(story_job)
-    schedule.every().day.at("19:30").do(story_job)
+    # Railway tourne en UTC. Paris = UTC+1 en hiver, UTC+2 en ete (heure d'ete).
+    # On compense : si on veut publier a 9h Paris heure d'ete, on programme a 7h UTC.
+    # Horaires UTC correspondant aux heures Paris (heure d'ete, CEST = UTC+2) :
+    #   Paris 08h30 -> UTC 06h30
+    #   Paris 09h00 -> UTC 07h00  (feed/reel quotidien)
+    #   Paris 10h00 -> UTC 08h00  (story matin)
+    #   Paris 13h00 -> UTC 11h00  (story midi)
+    #   Paris 17h00 -> UTC 15h00  (story apres-midi)
+    #   Paris 20h00 -> UTC 18h00  (story soir)
+    # En heure d'hiver (CET = UTC+1), ajouter 1h a chaque horaire UTC.
+    # Le bot utilise schedule sans timezone, donc on programme en UTC.
+    schedule.every().day.at("07:00").do(daily_dispatch_job)   # 09h Paris heure ete
+    schedule.every().day.at("08:00").do(story_job)             # 10h Paris heure ete
+    schedule.every().day.at("11:00").do(story_job)             # 13h Paris heure ete
+    schedule.every().day.at("15:00").do(story_job)             # 17h Paris heure ete
     while True:
         try:
             schedule.run_pending()
