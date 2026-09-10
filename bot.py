@@ -11,7 +11,7 @@ except ImportError:
     except ImportError:
         PARIS_TZ = None
 from bs4 import BeautifulSoup
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
 from flask import Flask, send_from_directory
 
 IG_USER_ID   = os.environ.get("IG_USER_ID", "17841400937343787")
@@ -295,133 +295,122 @@ def crop_to_45(image_bytes):
         print(f"Erreur recadrage: {e}")
         return image_bytes
 
+def _find_visual_focus(img):
+    """Retourne le point d'interet visuel principal sous la forme (x, y), entre 0 et 1."""
+    preview = img.copy()
+    preview.thumbnail((240, 240), Image.LANCZOS)
+    gray_img = preview.convert("L")
+    gray = np.asarray(gray_img, dtype=np.float32)
+    if gray.size == 0:
+        return 0.5, 0.5
+
+    # Les contrastes locaux et les contours donnent une bonne approximation de la
+    # zone importante, sans ajouter de dependance a un service d'analyse externe.
+    blur_radius = max(2, min(preview.size) // 30)
+    smooth = np.asarray(
+        gray_img.filter(ImageFilter.GaussianBlur(blur_radius)), dtype=np.float32
+    )
+    detail = np.abs(gray - smooth)
+    grad_y, grad_x = np.gradient(gray)
+    saliency = detail + 0.35 * (np.abs(grad_x) + np.abs(grad_y))
+
+    # Un leger biais central stabilise le cadrage sur les photos tres chargees,
+    # tout en laissant un produit decentre attirer naturellement le recadrage.
+    ph, pw = gray.shape
+    yy, xx = np.mgrid[0:ph, 0:pw]
+    distance = np.sqrt(
+        ((xx - (pw - 1) / 2) / max(1, pw)) ** 2
+        + ((yy - (ph - 1) / 2) / max(1, ph)) ** 2
+    )
+    saliency *= np.clip(1.0 - 0.45 * distance, 0.65, 1.0)
+    cutoff = np.percentile(saliency, 60)
+    weights = np.maximum(saliency - cutoff, 0)
+    total = float(weights.sum())
+    if total < 1e-6:
+        return 0.5, 0.5
+
+    focus_x = float((weights * xx).sum() / total) / max(1, pw - 1)
+    focus_y = float((weights * yy).sum() / total) / max(1, ph - 1)
+    return focus_x, focus_y
+
+
+def _cover_story_frame(img, target_size, focus):
+    """Remplit le cadre sans deformation en centrant le recadrage sur le point d'interet."""
+    target_w, target_h = target_size
+    w, h = img.size
+    scale = max(target_w / w, target_h / h)
+    new_w = max(target_w, int(w * scale + 0.5))
+    new_h = max(target_h, int(h * scale + 0.5))
+    resized = img.resize((new_w, new_h), Image.LANCZOS)
+
+    focus_x = int(focus[0] * new_w)
+    focus_y = int(focus[1] * new_h)
+    left = min(max(focus_x - target_w // 2, 0), new_w - target_w)
+    top = min(max(focus_y - target_h // 2, 0), new_h - target_h)
+    return resized.crop((left, top, left + target_w, top + target_h))
+
+
 def crop_to_916(image_bytes):
     """
-    Recadre en 9:16 pour les Stories/Reels :
-    - Detouré (fond blanc) : produit entier centré sur fond blanc
-    - Lifestyle : recadrage centré SEULEMENT si la perte reste faible (<=18%),
-      sinon on bascule en mode "contain" (fond blanc) pour ne jamais couper le produit
+    Prepare une image verticale 9:16 sans deformation ni bandes ajoutees.
+
+    Un recadrage plein ecran guide par le point d'interet est utilise lorsque la
+    perte reste moderee (20 % maximum). Si le recadrage couperait trop l'image,
+    la photo complete et nette est centree sur un fond plein ecran cree a partir
+    de la meme image agrandie et floutee. Le produit reste ainsi entier, sans
+    grandes marges blanches, bandeau, degrade sombre ni texte incruste.
     """
     try:
-        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        source = Image.open(io.BytesIO(image_bytes))
+        img = ImageOps.exif_transpose(source).convert("RGB")
         w, h = img.size
         if w <= 0 or h <= 0:
             return image_bytes
 
-        target_w, target_h = 900, 1600
-        target_ratio = target_w / target_h
-
-        fond_blanc = is_white_background(img)
-        if fond_blanc:
-            img = trim_white_borders(img)
-            w, h = img.size
-            if w <= 0 or h <= 0:
-                img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        # Retire uniquement les bordures blanches techniques eventuelles avant
+        # le cadrage ; aucune marge blanche n'est ensuite recreee.
+        if is_white_background(img):
+            trimmed = trim_white_borders(img)
+            if trimmed.size[0] > 0 and trimmed.size[1] > 0:
+                img = trimmed
                 w, h = img.size
 
-        if h == 0:
-            return image_bytes
-        src_ratio = w / h
+        target_size = (1080, 1920)
+        target_w, target_h = target_size
+        focus = _find_visual_focus(img)
 
-        use_contain = fond_blanc
-        if not use_contain:
-            # Estime la perte si on recadre pour remplir le cadre (mode "cover")
-            cover_scale = max(target_w / w, target_h / h)
-            covered_w, covered_h = w * cover_scale, h * cover_scale
-            overflow = max(
-                (covered_w - target_w) / covered_w,
-                (covered_h - target_h) / covered_h,
-            )
-            if overflow > 0.18:
-                use_contain = True
+        cover_scale = max(target_w / w, target_h / h)
+        covered_w = w * cover_scale
+        covered_h = h * cover_scale
+        crop_loss = max(
+            (covered_w - target_w) / covered_w,
+            (covered_h - target_h) / covered_h,
+        )
 
-        if use_contain:
-            canvas = Image.new("RGB", (target_w, target_h), (255, 255, 255))
-            margin_x = int(target_w * 0.07) if fond_blanc else 0
-            margin_y = int(target_h * 0.20) if fond_blanc else 0
-            max_w = target_w - margin_x * 2
-            max_h = target_h - margin_y * 2
-            scale = min(max_w / w, max_h / h)
-            new_w = max(1, int(w * scale))
-            new_h = max(1, int(h * scale))
-            img_resized = img.resize((new_w, new_h), Image.LANCZOS)
-            x = (target_w - new_w) // 2
-            y = (target_h - new_h) // 2
-            canvas.paste(img_resized, (x, y))
-            img_final = canvas
+        if crop_loss <= 0.20:
+            # Plein ecran avec un recadrage modere autour du sujet principal.
+            img_final = _cover_story_frame(img, target_size, focus)
         else:
-            if src_ratio > target_ratio:
-                new_h = target_h
-                new_w = max(1, int(new_h * src_ratio))
-                img_resized = img.resize((new_w, new_h), Image.LANCZOS)
-                x = (new_w - target_w) // 2
-                img_final = img_resized.crop((x, 0, x + target_w, target_h))
-            else:
-                new_w = target_w
-                new_h = max(1, int(new_w / src_ratio)) if src_ratio > 0 else target_h
-                img_resized = img.resize((new_w, new_h), Image.LANCZOS)
-                y = max(0, (new_h - target_h) // 2)
-                img_final = img_resized.crop((0, y, target_w, min(y + target_h, new_h)))
+            # Le plein ecran couperait trop le produit : fond issu de la meme
+            # photo, puis image complete et nette par-dessus, sans bandes blanches.
+            background = _cover_story_frame(img, target_size, focus)
+            blur_radius = max(24, int(max(target_size) * 0.025))
+            background = background.filter(ImageFilter.GaussianBlur(blur_radius))
+
+            scale = min(target_w / w, target_h / h)
+            new_w = max(1, int(w * scale + 0.5))
+            new_h = max(1, int(h * scale + 0.5))
+            foreground = img.resize((new_w, new_h), Image.LANCZOS)
+            left = (target_w - new_w) // 2
+            top = (target_h - new_h) // 2
+            background.paste(foreground, (left, top))
+            img_final = background
 
         output = io.BytesIO()
-        img_final.save(output, format="JPEG", quality=94)
+        img_final.save(output, format="JPEG", quality=94, optimize=True)
         return output.getvalue()
     except Exception as e:
-        print(f"Erreur recadrage story: {e}")
-        return image_bytes
-
-def _load_story_font(size):
-    candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-    ]
-    for path in candidates:
-        try:
-            return ImageFont.truetype(path, size)
-        except Exception:
-            continue
-    return ImageFont.load_default()
-
-def add_story_overlay(image_bytes, product):
-    """
-    Ajoute un bandeau en bas de la story : nom du produit, prix, et appel a l'action.
-    Tout est proportionnel a la hauteur de l'image pour rester lisible quelle que soit la resolution.
-    Meta ne permet pas de sticker lien cliquable via l'API -> texte incruste a la place.
-    """
-    try:
-        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        w, h = img.size
-        overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay)
-
-        band_top = h - int(h * 0.40)
-        solid_top = h - int(h * 0.26)
-        for y in range(band_top, solid_top):
-            ratio = (y - band_top) / max(1, (solid_top - band_top))
-            alpha = int(200 * ratio)
-            draw.line([(0, y), (w, y)], fill=(0, 0, 0, alpha))
-        draw.rectangle([0, solid_top, w, h], fill=(0, 0, 0, 225))
-
-        name_font  = _load_story_font(max(28, int(h * 0.032)))
-        price_font = _load_story_font(max(34, int(h * 0.040)))
-        cta_font   = _load_story_font(max(20, int(h * 0.023)))
-
-        name = product.get("nom", "")[:60]
-        prix = product.get("prix", "")
-        margin_x = int(w * 0.07)
-
-        draw.text((margin_x, h - int(h * 0.195)), name, font=name_font, fill=(255, 255, 255, 255))
-        if prix:
-            draw.text((margin_x, h - int(h * 0.140)), prix, font=price_font, fill=(255, 255, 255, 255))
-        draw.text((margin_x, h - int(h * 0.070)), "Decouvrir -> loftattitude.com", font=cta_font, fill=(225, 225, 225, 255))
-
-        final_img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
-        output = io.BytesIO()
-        final_img.save(output, format="JPEG", quality=92)
-        return output.getvalue()
-    except Exception as e:
-        print(f"Erreur overlay story: {e}")
+        print(f"Erreur recadrage story/reel: {e}")
         return image_bytes
 
 def generate_scene_background(product_name):
@@ -748,7 +737,7 @@ def get_story_candidates(n=STORY_SLIDE_COUNT):
 
 def build_story_slideshow(products):
     """Construit une video verticale (9:16) enchainant les photos des produits,
-    avec overlay nom/prix par slide et musique d'ambiance."""
+    sans texte incruste, avec une musique d'ambiance."""
     from moviepy import ImageClip, concatenate_videoclips, AudioFileClip, afx
     clips = []
     for i, product in enumerate(products):
@@ -899,7 +888,7 @@ def story_job():
     - 1 photo par Story, jamais de diaporama ou montage
     - Uniquement des photos lifestyle (interieur, ambiance) — jamais de fond blanc
     - Si aucune photo lifestyle dispo pour un produit, on essaie le suivant
-    - Lien produit incruste dans l'overlay
+    - Aucun bandeau, degrade, nom, prix ou texte incruste sur l'image
     - Ne leve jamais d'exception pour ne pas bloquer le bot
     """
     try:
@@ -935,14 +924,13 @@ def story_job():
         print(f"\nProduit retenu: {selected_product['nom']}")
         print(f"Photo lifestyle: {selected_image_url[-70:]}")
 
-        # Prepare l'image en format 9:16 avec overlay
+        # Prepare uniquement la photo lifestyle en 9:16, sans aucun overlay
         try:
             r = get_scrape_session().get(selected_image_url, timeout=15)
             if r.status_code != 200 or not r.content:
                 print("Echec telechargement image story.")
                 return
             story_img = crop_to_916(r.content)
-            story_img = add_story_overlay(story_img, selected_product)
         except Exception as e:
             print(f"Erreur preparation image story: {e}")
             return
@@ -1321,7 +1309,7 @@ def daily_dispatch_job():
         print(f"Erreur dispatch quotidien (ignoree): {e}")
 
 if __name__ == "__main__":
-    print("Bot Loft Attitude v15 - Lifestyle sans rognage / Detouré rognage+centrage")
+    print("Bot Loft Attitude v16 - Stories lifestyle 9:16 sans overlay")
     print(f"Stockage historique: {DATA_DIR} {'(persistant)' if DATA_DIR == '/data' else '(NON persistant - volume /data absent)'}")
     print(f"IG_USER_ID:  {IG_USER_ID}")
     print(f"FB_PAGE_ID:  {FB_PAGE_ID}")
