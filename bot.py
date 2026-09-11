@@ -1,4 +1,5 @@
 import os, time, requests, schedule, anthropic, json, base64, io, re, random, threading
+import os, time, requests, schedule, json, base64, io, re, random, threading
 import numpy as np
 from datetime import datetime
 try:
@@ -19,6 +20,12 @@ IG_TOKEN     = os.environ.get("IG_ACCESS_TOKEN", "")
 CLAUDE_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
 IMGBB_KEY    = os.environ.get("IMGBB_API_KEY", "")
 OPENAI_KEY   = os.environ.get("OPENAI_API_KEY", "")
+FB_PAGE_ID   = os.environ.get("FB_PAGE_ID", "100063636817093")
+IG_USER_ID   = os.environ.get("IG_USER_ID", "17841400937343787")
+IG_TOKEN     = os.environ.get("IG_ACCESS_TOKEN", "")
+IMGBB_KEY    = os.environ.get("IMGBB_API_KEY", "")
+OPENAI_KEY   = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 FB_PAGE_ID   = os.environ.get("FB_PAGE_ID", "100063636817093")
 FB_TOKEN     = os.environ.get("FB_PAGE_TOKEN", "")
 IG_BASE      = "https://graph.instagram.com/v21.0"
@@ -613,6 +620,114 @@ def is_lifestyle_image(image_url):
     except Exception as e:
         print(f"Erreur analyse image: {e}")
         return False, 0, True
+def _extract_openai_text(response_data):
+    """Extrait le premier texte utile d'une reponse de l'API Responses."""
+    for item in response_data.get("output", []):
+        if item.get("type") != "message":
+            continue
+        for content in item.get("content", []):
+            if content.get("type") == "output_text" and content.get("text"):
+                return content["text"]
+    return ""
+
+
+def _openai_json(input_content, schema_name, schema, max_output_tokens=600, instructions=None):
+    """Appelle OpenAI et renvoie un objet JSON conforme au schema demande."""
+    if not OPENAI_KEY:
+        print("OPENAI_API_KEY manquante, appel IA ignore.")
+        return None
+
+    payload = {
+        "model": OPENAI_MODEL,
+        "input": [{"role": "user", "content": input_content}],
+        "max_output_tokens": max_output_tokens,
+        "store": False,
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": schema_name,
+                "strict": True,
+                "schema": schema,
+            }
+        },
+    }
+    if instructions:
+        payload["instructions"] = instructions
+
+    r = requests.post(
+        "https://api.openai.com/v1/responses",
+        headers={
+            "Authorization": f"Bearer {OPENAI_KEY}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=60,
+    )
+    try:
+        response_data = r.json()
+    except ValueError:
+        raise RuntimeError(f"OpenAI HTTP {r.status_code}: reponse non JSON")
+    if r.status_code >= 400:
+        error = response_data.get("error", {})
+        message = error.get("message") if isinstance(error, dict) else str(error)
+        raise RuntimeError(f"OpenAI HTTP {r.status_code}: {message or 'erreur inconnue'}")
+
+    response_text = _extract_openai_text(response_data)
+    if not response_text:
+        raise RuntimeError("OpenAI n'a renvoye aucun texte exploitable")
+    return json.loads(response_text)
+
+
+def is_lifestyle_image(image_url):
+    """Analyse une photo produit avec OpenAI pour identifier les vraies mises en scene."""
+    try:
+        if not OPENAI_KEY:
+            print("Erreur analyse image: OPENAI_API_KEY manquante")
+            return False, 0, True
+
+        r = get_scrape_session().get(image_url, timeout=15)
+        if r.status_code != 200 or not r.content:
+            return False, 0, True
+
+        content_type = r.headers.get("content-type", "image/jpeg").split(";", 1)[0].strip()
+        if not content_type.startswith("image/"):
+            content_type = "image/jpeg"
+        img_b64 = base64.b64encode(r.content).decode("utf-8")
+        image_data_url = f"data:{content_type};base64,{img_b64}"
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "lifestyle": {"type": "boolean"},
+                "score": {"type": "integer", "minimum": 0, "maximum": 10},
+                "produit_entier": {"type": "boolean"},
+            },
+            "required": ["lifestyle", "score", "produit_entier"],
+            "additionalProperties": False,
+        }
+        prompt = (
+            "Analyse cette image produit pour une publication Instagram de mobilier et decoration. "
+            "lifestyle=true uniquement si le produit est photographie dans un interieur, une ambiance "
+            "ou une vraie mise en scene. lifestyle=false pour un fond blanc ou uni, un produit detoure, "
+            "un visuel technique ou un detail de texture. produit_entier=true si le produit principal "
+            "est visible en entier. Le score de 0 a 10 mesure la qualite visuelle pour Instagram : "
+            "favorise une vue complete, elegante et nette, et penalise fortement les details et zooms."
+        )
+        result = _openai_json(
+            [
+                {"type": "input_text", "text": prompt},
+                {"type": "input_image", "image_url": image_data_url, "detail": "low"},
+            ],
+            "analyse_image_produit",
+            schema,
+            max_output_tokens=150,
+        )
+        if not result:
+            return False, 0, True
+        return result["lifestyle"], result["score"], result["produit_entier"]
+    except Exception as e:
+        print(f"Erreur analyse image OpenAI: {e}")
+        return False, 0, True
 
 def select_best_images(images, max_images=5, product_name=""):
     if not images:
@@ -823,6 +938,7 @@ def find_lifestyle_image_for_product(product):
     Cherche la meilleure photo lifestyle pour un produit donne.
     1. Scrape toutes les images de la fiche produit
     2. Analyse chaque image avec Claude Vision
+    2. Analyse chaque image avec OpenAI Vision
     3. Retourne la meilleure photo lifestyle (score le plus eleve)
     4. Si aucune photo lifestyle trouvee, retourne None (jamais de detouree)
     """
@@ -1017,6 +1133,49 @@ def generate_caption(product):
         return data["caption"] + "\n\n" + " ".join(data["hashtags"])
     except Exception as e:
         print(f"Erreur caption: {e}")
+        return f"Nouvelle arrivee chez Loft Attitude ! {product['nom']} - {product['prix']}\nRetrouvez ce produit via le lien en bio 👆 loftattitude.com\n\n#loftattitude #design #deco #meuble #loftdesign"
+def generate_caption(product):
+    try:
+        schema = {
+            "type": "object",
+            "properties": {
+                "caption": {"type": "string"},
+                "hashtags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 25,
+                    "maxItems": 25,
+                },
+            },
+            "required": ["caption", "hashtags"],
+            "additionalProperties": False,
+        }
+        instructions = (
+            'Tu es expert marketing Instagram pour "Loft Attitude", boutique de meubles et objets '
+            "design loft, industriel et contemporain. Ecris en francais une legende elegante de 120 "
+            "a 150 mots avec quelques emojis et un storytelling centre sur le produit et son ambiance. "
+            "Termine toujours la legende par cette phrase exacte : Retrouvez ce produit via le lien en "
+            "bio 👆 loftattitude.com. Fournis aussi exactement 25 hashtags pertinents."
+        )
+        data = _openai_json(
+            f"Produit: {product['nom']}\nPrix: {product['prix']}\nURL: {product['url']}",
+            "legende_instagram",
+            schema,
+            max_output_tokens=800,
+            instructions=instructions,
+        )
+        if not data:
+            raise RuntimeError("Aucune legende renvoyee par OpenAI")
+        hashtags = []
+        for tag in data["hashtags"]:
+            tag = re.sub(r"\s+", "", str(tag).strip())
+            if tag and not tag.startswith("#"):
+                tag = "#" + tag
+            if tag:
+                hashtags.append(tag)
+        return data["caption"].strip() + "\n\n" + " ".join(hashtags)
+    except Exception as e:
+        print(f"Erreur caption OpenAI: {e}")
         return f"Nouvelle arrivee chez Loft Attitude ! {product['nom']} - {product['prix']}\nRetrouvez ce produit via le lien en bio 👆 loftattitude.com\n\n#loftattitude #design #deco #meuble #loftdesign"
 
 def publish_instagram(images_urls, caption):
@@ -1310,12 +1469,14 @@ def daily_dispatch_job():
 
 if __name__ == "__main__":
     print("Bot Loft Attitude v16 - Stories lifestyle 9:16 sans overlay")
+    print("Bot Loft Attitude v17 - OpenAI / Stories lifestyle 9:16 sans overlay")
     print(f"Stockage historique: {DATA_DIR} {'(persistant)' if DATA_DIR == '/data' else '(NON persistant - volume /data absent)'}")
     print(f"IG_USER_ID:  {IG_USER_ID}")
     print(f"FB_PAGE_ID:  {FB_PAGE_ID}")
     print(f"IMGBB:       {'OK' if IMGBB_KEY else 'MANQUANT'}")
     print(f"Token IG:    {'OK' if IG_TOKEN else 'MANQUANT'}")
     print(f"Claude:      {'OK' if CLAUDE_KEY else 'MANQUANT'}")
+    print(f"OpenAI:      {'OK' if OPENAI_KEY else 'MANQUANT'} ({OPENAI_MODEL})")
     print("Publication feed/reel planifiee a 09:00 (alternee un jour sur deux)")
     print("Stories planifiees a 12:30, 19:30\n")
     threading.Thread(target=start_flask_server, daemon=True).start()
