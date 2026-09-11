@@ -190,6 +190,53 @@ def crop_to_45(image_bytes):
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         w, h = img.size
         print(f"  Taille originale: {w}x{h}")
+def _fit_on_white_canvas(image_bytes, target_size, margin_ratio=0.055):
+    """Place une photo de produit entiere sur un fond blanc, sans deformation."""
+    try:
+        source = Image.open(io.BytesIO(image_bytes))
+        img = ImageOps.exif_transpose(source).convert("RGB")
+        if img.width <= 0 or img.height <= 0:
+            return image_bytes
+
+        # Les fichiers du site ont souvent de grandes bordures blanches. On les
+        # retire d'abord afin que le produit occupe correctement le nouveau cadre.
+        img = trim_white_borders(img)
+        w, h = img.size
+        if w <= 0 or h <= 0:
+            return image_bytes
+
+        target_w, target_h = target_size
+        margin_x = max(20, int(target_w * margin_ratio))
+        margin_y = max(20, int(target_h * margin_ratio))
+        max_w = target_w - 2 * margin_x
+        max_h = target_h - 2 * margin_y
+        scale = min(max_w / w, max_h / h)
+        new_w = max(1, int(w * scale + 0.5))
+        new_h = max(1, int(h * scale + 0.5))
+
+        foreground = img.resize((new_w, new_h), Image.LANCZOS)
+        canvas = Image.new("RGB", target_size, (255, 255, 255))
+        left = (target_w - new_w) // 2
+        top = (target_h - new_h) // 2
+        canvas.paste(foreground, (left, top))
+
+        output = io.BytesIO()
+        canvas.save(output, format="JPEG", quality=94, optimize=True)
+        print(f"  Produit entier {new_w}x{new_h} centre sur fond blanc")
+        return output.getvalue()
+    except Exception as e:
+        print(f"Erreur mise sur fond blanc: {e}")
+        return image_bytes
+
+
+def crop_to_45(image_bytes):
+    """Prepare une publication 4:5 (1080x1350) sur fond blanc."""
+    return _fit_on_white_canvas(image_bytes, (1080, 1350), margin_ratio=0.055)
+
+
+def crop_to_916_reel(image_bytes):
+    """Prepare une image de Reel 9:16 (1080x1920) sur fond blanc, sans flou."""
+    return _fit_on_white_canvas(image_bytes, (1080, 1920), margin_ratio=0.055)
 
         if w <= 0 or h <= 0:
             return image_bytes
@@ -537,6 +584,8 @@ def upload_to_imgbb(image_bytes):
         return None
 
 def process_image(image_url):
+def process_image(image_url):
+    """Prepare une image de publication sur fond blanc puis l'heberge."""
     try:
         r = get_scrape_session().get(image_url, timeout=15)
         if r.status_code != 200:
@@ -732,6 +781,10 @@ def is_lifestyle_image(image_url):
 def select_best_images(images, max_images=5, product_name=""):
     if not images:
         return []
+def select_best_images(images, max_images=5, product_name=""):
+    """Selectionne en priorite les vues produit detourees pour les posts et Reels."""
+    if not images:
+        return []
     print(f"Analyse IA de {min(len(images), 8)} images...")
     scored = []
     for i, img_url in enumerate(images[:8]):
@@ -745,6 +798,18 @@ def select_best_images(images, max_images=5, product_name=""):
     best = [item["url"] for item in scored[:max_images]]
     lifestyle_count = sum(1 for item in scored[:max_images] if item["lifestyle"])
     print(f"Selection: {len(best)} images ({lifestyle_count} lifestyle)")
+    return best
+        # Pour les publications et Reels, priorite au produit entier sur fond
+        # blanc. Les Stories disposent de leur propre selection lifestyle.
+        final_score = score + (3 if produit_entier else -4)
+        scored.append({"url": img_url, "lifestyle": is_lifestyle, "score": final_score, "entier": produit_entier})
+        print(f"  -> Lifestyle: {is_lifestyle}, Entier: {produit_entier}, Score: {final_score}")
+    scored.sort(key=lambda x: (not x["lifestyle"], x["entier"], x["score"]), reverse=True)
+    detourees = [item for item in scored if not item["lifestyle"]]
+    selection = detourees[:max_images] if detourees else scored[:max_images]
+    best = [item["url"] for item in selection]
+    lifestyle_count = sum(1 for item in selection if item["lifestyle"])
+    print(f"Selection: {len(best)} images ({len(best) - lifestyle_count} detourees, {lifestyle_count} lifestyle)")
     return best
 
 def parse_price(text):
@@ -1320,6 +1385,8 @@ def daily_job():
 
 def build_reel_video(image_urls):
     """Construit un Reel (9:16) a partir des photos du produit, avec la musique d'ambiance, sans overlay."""
+def build_reel_video(image_urls):
+    """Construit un Reel 9:16 sur fond blanc, avec musique et sans overlay."""
     from moviepy import ImageClip, concatenate_videoclips, AudioFileClip, afx
     clips = []
     for i, image_url in enumerate(image_urls):
@@ -1328,6 +1395,7 @@ def build_reel_video(image_urls):
             if r.status_code != 200:
                 continue
             slide_bytes = crop_to_916(r.content)
+            slide_bytes = crop_to_916_reel(r.content)
             slide_path = os.path.join(STORY_SLIDES_DIR, f"reel_{i}_{int(time.time())}.jpg")
             with open(slide_path, "wb") as f:
                 f.write(slide_bytes)
@@ -1469,7 +1537,7 @@ def daily_dispatch_job():
 
 if __name__ == "__main__":
     print("Bot Loft Attitude v16 - Stories lifestyle 9:16 sans overlay")
-    print("Bot Loft Attitude v17 - OpenAI / Stories lifestyle 9:16 sans overlay")
+    print("Bot Loft Attitude v18 - Stories lifestyle / Posts et Reels sur fond blanc")
     print(f"Stockage historique: {DATA_DIR} {'(persistant)' if DATA_DIR == '/data' else '(NON persistant - volume /data absent)'}")
     print(f"IG_USER_ID:  {IG_USER_ID}")
     print(f"FB_PAGE_ID:  {FB_PAGE_ID}")
