@@ -1,4 +1,3 @@
-import os, time, requests, schedule, anthropic, json, base64, io, re, random, threading
 import os, time, requests, schedule, json, base64, io, re, random, threading
 import numpy as np
 from datetime import datetime
@@ -15,12 +14,6 @@ from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
 from flask import Flask, send_from_directory
 
-IG_USER_ID   = os.environ.get("IG_USER_ID", "17841400937343787")
-IG_TOKEN     = os.environ.get("IG_ACCESS_TOKEN", "")
-CLAUDE_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
-IMGBB_KEY    = os.environ.get("IMGBB_API_KEY", "")
-OPENAI_KEY   = os.environ.get("OPENAI_API_KEY", "")
-FB_PAGE_ID   = os.environ.get("FB_PAGE_ID", "100063636817093")
 IG_USER_ID   = os.environ.get("IG_USER_ID", "17841400937343787")
 IG_TOKEN     = os.environ.get("IG_ACCESS_TOKEN", "")
 IMGBB_KEY    = os.environ.get("IMGBB_API_KEY", "")
@@ -180,16 +173,6 @@ def is_white_background(img, threshold=242, min_ratio=0.35):
     except:
         return False
 
-def crop_to_45(image_bytes):
-    """
-    Recadre en 4:5 (1080x1350) intelligemment :
-    - Lifestyle (fond colore) : AUCUN rognage, juste recadrage 4:5 au centre
-    - Detouré (fond blanc)   : rognage bandes, produit entier centré
-    """
-    try:
-        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        w, h = img.size
-        print(f"  Taille originale: {w}x{h}")
 def _fit_on_white_canvas(image_bytes, target_size, margin_ratio=0.055):
     """Place une photo de produit entiere sur un fond blanc, sans deformation."""
     try:
@@ -237,117 +220,6 @@ def crop_to_45(image_bytes):
 def crop_to_916_reel(image_bytes):
     """Prepare une image de Reel 9:16 (1080x1920) sur fond blanc, sans flou."""
     return _fit_on_white_canvas(image_bytes, (1080, 1920), margin_ratio=0.055)
-
-        if w <= 0 or h <= 0:
-            return image_bytes
-
-        target_w, target_h = 1080, 1350
-        target_ratio = target_w / target_h
-
-        if h == 0:
-            return image_bytes
-
-        # Detecte d'abord si fond blanc sur l'image originale
-        fond_blanc = is_white_background(img)
-        print(f"  Type: {'detouré fond blanc' if fond_blanc else 'lifestyle (pas de rognage)'}")
-
-        # Rognage UNIQUEMENT pour les photos detourees sur fond blanc
-        if fond_blanc:
-            img = trim_white_borders(img)
-            w, h = img.size
-            if w <= 0 or h <= 0:
-                img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-                w, h = img.size
-            print(f"  Apres rognage: {w}x{h}")
-        # Pour les photos lifestyle : on garde l'image telle quelle
-        else:
-            w, h = img.size
-
-        if h == 0:
-            return image_bytes
-        src_ratio = w / h
-
-        if fond_blanc:
-            # Produit détouré : entier, centré, fond blanc, marge 60px
-            canvas = Image.new("RGB", (target_w, target_h), (255, 255, 255))
-            margin = 60
-            max_w = target_w - margin * 2
-            max_h = target_h - margin * 2
-
-            # Securite
-            if w == 0 or h == 0:
-                return image_bytes
-
-            scale = min(max_w / w, max_h / h)
-            new_w = max(1, int(w * scale))
-            new_h = max(1, int(h * scale))
-            img_resized = img.resize((new_w, new_h), Image.LANCZOS)
-            x = (target_w - new_w) // 2
-            y = (target_h - new_h) // 2
-            canvas.paste(img_resized, (x, y))
-            img_final = canvas
-            print(f"  → Produit entier {new_w}x{new_h} sur fond blanc")
-
-        else:
-            # Photo lifestyle : recadre en perdant le moins possible
-            ratio_diff = abs(src_ratio - target_ratio) / target_ratio if target_ratio > 0 else 1
-
-            if ratio_diff < 0.15:
-                # Ratio proche 4:5 : redimensionne direct
-                img_final = img.resize((target_w, target_h), Image.LANCZOS)
-                print(f"  → Redimensionne direct (ratio proche)")
-
-            elif src_ratio > target_ratio:
-                # Paysage : coupe les côtés max 15%
-                new_h = target_h
-                new_w = max(1, int(new_h * src_ratio))
-                img_resized = img.resize((new_w, new_h), Image.LANCZOS)
-                excess = new_w - target_w
-                if excess <= 0:
-                    # Pas assez large, centre avec fond blanc
-                    canvas = Image.new("RGB", (target_w, target_h), (255, 255, 255))
-                    x = (target_w - new_w) // 2
-                    canvas.paste(img_resized, (x, 0))
-                    img_final = canvas
-                else:
-                    max_cut = int(new_w * 0.15)
-                    left = min(excess // 2, max_cut)
-                    right_crop = left + target_w
-                    if right_crop > new_w:
-                        right_crop = new_w
-                        left = max(0, right_crop - target_w)
-                    img_final = img_resized.crop((left, 0, right_crop, target_h))
-                print(f"  → Lifestyle paysage")
-
-            else:
-                # Portrait : coupe haut/bas max 20%
-                new_w = target_w
-                new_h = max(1, int(new_w / src_ratio)) if src_ratio > 0 else target_h
-                img_resized = img.resize((new_w, new_h), Image.LANCZOS)
-                excess = new_h - target_h
-                if excess <= 0:
-                    # Pas assez grand, centre avec fond blanc
-                    canvas = Image.new("RGB", (target_w, target_h), (255, 255, 255))
-                    y = (target_h - new_h) // 2
-                    canvas.paste(img_resized, (0, y))
-                    img_final = canvas
-                else:
-                    max_cut = int(new_h * 0.20)
-                    top = min(excess // 2, max_cut)
-                    bottom_crop = top + target_h
-                    if bottom_crop > new_h:
-                        bottom_crop = new_h
-                        top = max(0, bottom_crop - target_h)
-                    img_final = img_resized.crop((0, top, target_w, bottom_crop))
-                print(f"  → Lifestyle portrait")
-
-        output = io.BytesIO()
-        img_final.save(output, format="JPEG", quality=92)
-        return output.getvalue()
-
-    except Exception as e:
-        print(f"Erreur recadrage: {e}")
-        return image_bytes
 
 def _find_visual_focus(img):
     """Retourne le point d'interet visuel principal sous la forme (x, y), entre 0 et 1."""
@@ -584,7 +456,6 @@ def upload_to_imgbb(image_bytes):
         return None
 
 def process_image(image_url):
-def process_image(image_url):
     """Prepare une image de publication sur fond blanc puis l'heberge."""
     try:
         r = get_scrape_session().get(image_url, timeout=15)
@@ -645,30 +516,6 @@ def get_product_images(product_url):
         print(f"Erreur scraping images: {e}")
         return []
 
-def is_lifestyle_image(image_url):
-    try:
-        client = anthropic.Anthropic(api_key=CLAUDE_KEY)
-        r = requests.get(image_url, timeout=10)
-        if r.status_code != 200:
-            return False, 0, True
-        img_b64 = base64.b64encode(r.content).decode("utf-8")
-        content_type = r.headers.get("content-type", "image/jpeg")
-        msg = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=100,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": content_type, "data": img_b64}},
-                    {"type": "text", "text": 'Analyse cette image produit. Reponds UNIQUEMENT en JSON: {"lifestyle": true/false, "score": 0-10, "produit_entier": true/false}\nlifestyle=true si photo dans un interieur/ambiance/mise en scene avec le produit visible\nlifestyle=false si fond blanc/uni/produit seul detouré\nproduit_entier=true si on voit le produit en entier, false si cest un detail/zoom/texture\nscore: qualite visuelle Instagram (penalise fortement les zooms sur details/textures, favorise les vues completes du produit)'}
-                ]
-            }]
-        )
-        result = json.loads(msg.content[0].text.replace("```json","").replace("```","").strip())
-        return result.get("lifestyle", False), result.get("score", 0), result.get("produit_entier", True)
-    except Exception as e:
-        print(f"Erreur analyse image: {e}")
-        return False, 0, True
 def _extract_openai_text(response_data):
     """Extrait le premier texte utile d'une reponse de l'API Responses."""
     for item in response_data.get("output", []):
@@ -779,9 +626,6 @@ def is_lifestyle_image(image_url):
         return False, 0, True
 
 def select_best_images(images, max_images=5, product_name=""):
-    if not images:
-        return []
-def select_best_images(images, max_images=5, product_name=""):
     """Selectionne en priorite les vues produit detourees pour les posts et Reels."""
     if not images:
         return []
@@ -790,15 +634,6 @@ def select_best_images(images, max_images=5, product_name=""):
     for i, img_url in enumerate(images[:8]):
         print(f"  Image {i+1}...")
         is_lifestyle, score, produit_entier = is_lifestyle_image(img_url)
-        # Bonus lifestyle + bonus produit entier, malus si detail/zoom
-        final_score = score + (5 if is_lifestyle else 0) + (3 if produit_entier else -4)
-        scored.append({"url": img_url, "lifestyle": is_lifestyle, "score": final_score, "entier": produit_entier})
-        print(f"  -> Lifestyle: {is_lifestyle}, Entier: {produit_entier}, Score: {final_score}")
-    scored.sort(key=lambda x: x["score"], reverse=True)
-    best = [item["url"] for item in scored[:max_images]]
-    lifestyle_count = sum(1 for item in scored[:max_images] if item["lifestyle"])
-    print(f"Selection: {len(best)} images ({lifestyle_count} lifestyle)")
-    return best
         # Pour les publications et Reels, priorite au produit entier sur fond
         # blanc. Les Stories disposent de leur propre selection lifestyle.
         final_score = score + (3 if produit_entier else -4)
@@ -1002,7 +837,6 @@ def find_lifestyle_image_for_product(product):
     """
     Cherche la meilleure photo lifestyle pour un produit donne.
     1. Scrape toutes les images de la fiche produit
-    2. Analyse chaque image avec Claude Vision
     2. Analyse chaque image avec OpenAI Vision
     3. Retourne la meilleure photo lifestyle (score le plus eleve)
     4. Si aucune photo lifestyle trouvee, retourne None (jamais de detouree)
@@ -1185,20 +1019,6 @@ def get_next_product():
         print(f"Erreur scraping: {e}")
         return None
 
-def generate_caption(product):
-    try:
-        client = anthropic.Anthropic(api_key=CLAUDE_KEY)
-        msg = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=600,
-            system='Tu es expert marketing Instagram pour "Loft Attitude", boutique de meubles et objets design loft, industriel et contemporain. Reponds UNIQUEMENT en JSON valide sans markdown: {"caption":"caption Instagram 120-150 mots avec emojis, storytelling produit, ambiance design, termine TOUJOURS par : Retrouvez ce produit via le lien en bio 👆 loftattitude.com","hashtags":["25 hashtags pertinents"]}',
-            messages=[{"role": "user", "content": f"Produit: {product['nom']}\nPrix: {product['prix']}\nURL: {product['url']}"}]
-        )
-        data = json.loads(msg.content[0].text.replace("```json","").replace("```","").strip())
-        return data["caption"] + "\n\n" + " ".join(data["hashtags"])
-    except Exception as e:
-        print(f"Erreur caption: {e}")
-        return f"Nouvelle arrivee chez Loft Attitude ! {product['nom']} - {product['prix']}\nRetrouvez ce produit via le lien en bio 👆 loftattitude.com\n\n#loftattitude #design #deco #meuble #loftdesign"
 def generate_caption(product):
     try:
         schema = {
@@ -1384,8 +1204,6 @@ def daily_job():
     print(f"\nResultat: Instagram={'OK' if ig_ok else 'ECHEC'} | Facebook={'OK' if fb_ok else 'ECHEC'}")
 
 def build_reel_video(image_urls):
-    """Construit un Reel (9:16) a partir des photos du produit, avec la musique d'ambiance, sans overlay."""
-def build_reel_video(image_urls):
     """Construit un Reel 9:16 sur fond blanc, avec musique et sans overlay."""
     from moviepy import ImageClip, concatenate_videoclips, AudioFileClip, afx
     clips = []
@@ -1394,7 +1212,6 @@ def build_reel_video(image_urls):
             r = get_scrape_session().get(image_url, timeout=15)
             if r.status_code != 200:
                 continue
-            slide_bytes = crop_to_916(r.content)
             slide_bytes = crop_to_916_reel(r.content)
             slide_path = os.path.join(STORY_SLIDES_DIR, f"reel_{i}_{int(time.time())}.jpg")
             with open(slide_path, "wb") as f:
@@ -1536,17 +1353,15 @@ def daily_dispatch_job():
         print(f"Erreur dispatch quotidien (ignoree): {e}")
 
 if __name__ == "__main__":
-    print("Bot Loft Attitude v16 - Stories lifestyle 9:16 sans overlay")
     print("Bot Loft Attitude v18 - Stories lifestyle / Posts et Reels sur fond blanc")
     print(f"Stockage historique: {DATA_DIR} {'(persistant)' if DATA_DIR == '/data' else '(NON persistant - volume /data absent)'}")
     print(f"IG_USER_ID:  {IG_USER_ID}")
     print(f"FB_PAGE_ID:  {FB_PAGE_ID}")
     print(f"IMGBB:       {'OK' if IMGBB_KEY else 'MANQUANT'}")
     print(f"Token IG:    {'OK' if IG_TOKEN else 'MANQUANT'}")
-    print(f"Claude:      {'OK' if CLAUDE_KEY else 'MANQUANT'}")
     print(f"OpenAI:      {'OK' if OPENAI_KEY else 'MANQUANT'} ({OPENAI_MODEL})")
-    print("Publication feed/reel planifiee a 09:00 (alternee un jour sur deux)")
-    print("Stories planifiees a 12:30, 19:30\n")
+    print("Publication feed/reel planifiee a 07:00 UTC (alternee un jour sur deux)")
+    print("Stories planifiees a 08:00, 11:00 et 15:00 UTC\n")
     threading.Thread(target=start_flask_server, daemon=True).start()
     print(f"Serveur video demarre sur le port {os.environ.get('PORT', 8080)}\n")
     try:
