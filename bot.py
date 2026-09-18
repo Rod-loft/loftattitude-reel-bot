@@ -16,16 +16,49 @@ from flask import Flask, send_from_directory
 
 IG_USER_ID   = os.environ.get("IG_USER_ID", "17841400937343787")
 IG_TOKEN     = os.environ.get("IG_ACCESS_TOKEN", "")
+IG_NATIVE_AUDIO_TOKEN = os.environ.get("IG_NATIVE_AUDIO_TOKEN", "")
 IMGBB_KEY    = os.environ.get("IMGBB_API_KEY", "")
 OPENAI_KEY   = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 FB_PAGE_ID   = os.environ.get("FB_PAGE_ID", "100063636817093")
 FB_TOKEN     = os.environ.get("FB_PAGE_TOKEN", "")
 IG_BASE      = "https://graph.instagram.com/v21.0"
+IG_BASE      = "https://graph.instagram.com/v21.0"
 FB_BASE      = "https://graph.facebook.com/v21.0"
 DATA_DIR = "/data" if os.path.isdir("/data") and os.access("/data", os.W_OK) else "/tmp"
 HISTORY_FILE = os.path.join(DATA_DIR, "published_products.json")
 STORY_HISTORY_FILE = os.path.join(DATA_DIR, "published_stories.json")
+IG_AUDIO_BASE = "https://graph.facebook.com/v22.0"
+FB_BASE      = "https://graph.facebook.com/v21.0"
+DATA_DIR = "/data" if os.path.isdir("/data") and os.access("/data", os.W_OK) else "/tmp"
+HISTORY_FILE = os.path.join(DATA_DIR, "published_products.json")
+STORY_HISTORY_FILE = os.path.join(DATA_DIR, "published_stories.json")
+REEL_AUDIO_HISTORY_FILE = os.path.join(DATA_DIR, "published_reel_audio.json")
+
+# Audios Instagram choisis par Loft Attitude. Meta controle leur disponibilite
+# pour les comptes professionnels au moment de la publication.
+DEFAULT_IG_REEL_AUDIO_IDS = [
+    "762806983127007",    # Betterment - Beautiful Life
+    "754474975848343",    # marianneemusic - Audio d'origine
+    "2006821089449485",   # Diana Ross - Upside Down (Original CHIC Mix)
+    "1406057105005252",   # LAVLO - Seasons
+    "29249268567994156",  # sohaib_alisher - Audio d'origine
+    "467618430436929",    # France Gall - Musique
+    "2740222792873277",   # Aoi Teshima - C'est si bon
+    "1084359176109196",   # ANOTR, Leven Kali, Erik Bandt - How You Feel
+    "1680385156615282",   # Dubdogz, FEZZO, Zaark - How Does It Feel
+    "1314173264000559",   # Hinotoriprojekt - La Dolce Riviera
+    "934922342851337",    # Cielo - Sunny Afternoon
+    "949918737908129",    # DreamPulse Beats - The New Collection
+    "1345239764082094",   # Benetti House Bar - Art Deco Hour
+]
+IG_REEL_AUDIO_IDS = [
+    value.strip()
+    for value in os.environ.get(
+        "IG_REEL_AUDIO_IDS", ",".join(DEFAULT_IG_REEL_AUDIO_IDS)
+    ).split(",")
+    if value.strip().isdigit()
+]
 
 # ─── STORIES : MARQUES CIBLEES ─────────────────────────────────────────────────
 
@@ -125,6 +158,67 @@ def mark_as_storied(product_url):
         history.append(product_url)
         save_story_history(history)
     print(f"Produit marque comme publie en story: {product_url}")
+def mark_as_storied(product_url):
+    history = load_story_history()
+    if product_url not in history:
+        history.append(product_url)
+        save_story_history(history)
+    print(f"Produit marque comme publie en story: {product_url}")
+
+def load_reel_audio_history():
+    try:
+        with open(REEL_AUDIO_HISTORY_FILE, "r") as f:
+            history = json.load(f)
+        return history if isinstance(history, list) else []
+    except Exception:
+        return []
+
+def save_reel_audio_history(history):
+    try:
+        with open(REEL_AUDIO_HISTORY_FILE, "w") as f:
+            json.dump(history[-50:], f)
+    except Exception as e:
+        print(f"Erreur sauvegarde historique audio reel: {e}")
+
+def mark_reel_audio_used(audio_id):
+    history = [value for value in load_reel_audio_history() if value != audio_id]
+    history.append(audio_id)
+    save_reel_audio_history(history)
+
+def select_available_instagram_audio():
+    """Choisit un audio natif autorise par Meta, sans repetition rapprochee."""
+    if not IG_NATIVE_AUDIO_TOKEN or not IG_REEL_AUDIO_IDS:
+        return None
+
+    recent = set(load_reel_audio_history()[-5:])
+    preferred = [value for value in IG_REEL_AUDIO_IDS if value not in recent]
+    fallback = [value for value in IG_REEL_AUDIO_IDS if value in recent]
+    random.shuffle(preferred)
+    random.shuffle(fallback)
+
+    # Quelques essais suffisent; en cas d'indisponibilite globale, le Reel
+    # est publie avec la musique locale deja integree a la video.
+    for audio_id in (preferred + fallback)[:5]:
+        try:
+            response = requests.get(
+                f"{IG_AUDIO_BASE}/{audio_id}",
+                params={
+                    "user_id": IG_USER_ID,
+                    "access_token": IG_NATIVE_AUDIO_TOKEN,
+                },
+                timeout=20,
+            )
+            result = response.json()
+            if response.ok and result.get("audio_id"):
+                label = " - ".join(
+                    value for value in (result.get("display_artist"), result.get("title")) if value
+                )
+                print(f"Audio Instagram retenu: {label or audio_id} ({audio_id})")
+                return audio_id
+            print(f"Audio Instagram indisponible {audio_id}: {result.get('error', {}).get('message', 'refuse par Meta')}")
+        except Exception as e:
+            print(f"Erreur verification audio Instagram {audio_id}: {e}")
+    return None
 
 # ─── TRAITEMENT IMAGE ─────────────────────────────────────────────────────────
 
@@ -1255,12 +1349,59 @@ def publish_instagram_reel(video_url, caption):
     if "id" not in result1:
         print(f"Erreur creation reel: {result1}")
         return False
+def publish_instagram_reel(video_url, caption):
+    if not video_url or not IG_TOKEN:
+        return False
+    audio_id = select_available_instagram_audio()
+    publish_base = IG_BASE
+    publish_token = IG_TOKEN
+    result1 = {}
+
+    if audio_id:
+        native_audio_data = {
+            "video_url": video_url,
+            "media_type": "REELS",
+            "caption": caption,
+            "audio_configuration": json.dumps({
+                "audio_id": audio_id,
+                "audio_volume": 100,
+                # La video contient la musique locale destinee a Facebook.
+                # On la rend quasi inaudible sur Instagram pour eviter un mix.
+                "video_volume": 1,
+            }),
+            "access_token": IG_NATIVE_AUDIO_TOKEN,
+        }
+        native_response = requests.post(
+            f"{IG_AUDIO_BASE}/{IG_USER_ID}/media", data=native_audio_data, timeout=30
+        )
+        result1 = native_response.json()
+        if "id" in result1:
+            publish_base = IG_AUDIO_BASE
+            publish_token = IG_NATIVE_AUDIO_TOKEN
+        else:
+            print(f"Audio natif refuse, repli sur la musique locale: {result1}")
+            audio_id = None
+
+    if "id" not in result1:
+        r1 = requests.post(f"{IG_BASE}/{IG_USER_ID}/media", data={
+            "video_url": video_url,
+            "media_type": "REELS",
+            "caption": caption,
+            "access_token": IG_TOKEN,
+        }, timeout=30)
+        result1 = r1.json()
+    if "id" not in result1:
+        print(f"Erreur creation reel: {result1}")
+        return False
     creation_id = result1["id"]
     for attempt in range(20):
         time.sleep(10)
         status_r = requests.get(f"{IG_BASE}/{creation_id}", params={
             "fields": "status_code", "access_token": IG_TOKEN,
         })
+        status_r = requests.get(f"{publish_base}/{creation_id}", params={
+            "fields": "status_code", "access_token": publish_token,
+        }, timeout=20)
         status = status_r.json().get("status_code")
         print(f"Statut reel: {status} (tentative {attempt + 1})")
         if status == "FINISHED":
@@ -1274,9 +1415,17 @@ def publish_instagram_reel(video_url, caption):
     r2 = requests.post(f"{IG_BASE}/{IG_USER_ID}/media_publish", data={
         "creation_id": creation_id, "access_token": IG_TOKEN,
     })
+    r2 = requests.post(f"{publish_base}/{IG_USER_ID}/media_publish", data={
+        "creation_id": creation_id, "access_token": publish_token,
+    }, timeout=30)
     result2 = r2.json()
     if "id" in result2:
         print(f"Reel Instagram OK ! ID: {result2['id']}")
+        return True
+    if "id" in result2:
+        print(f"Reel Instagram OK ! ID: {result2['id']}")
+        if audio_id:
+            mark_reel_audio_used(audio_id)
         return True
     print(f"Erreur publication reel: {result2}")
     return False
@@ -1359,9 +1508,13 @@ if __name__ == "__main__":
     print(f"FB_PAGE_ID:  {FB_PAGE_ID}")
     print(f"IMGBB:       {'OK' if IMGBB_KEY else 'MANQUANT'}")
     print(f"Token IG:    {'OK' if IG_TOKEN else 'MANQUANT'}")
+    print(f"Token IG:    {'OK' if IG_TOKEN else 'MANQUANT'}")
+    print(f"Audio IG:    {'NATIF' if IG_NATIVE_AUDIO_TOKEN else 'LOCAL (IG_NATIVE_AUDIO_TOKEN manquant)'}")
     print(f"OpenAI:      {'OK' if OPENAI_KEY else 'MANQUANT'} ({OPENAI_MODEL})")
     print("Publication feed/reel planifiee a 07:00 UTC (alternee un jour sur deux)")
     print("Stories planifiees a 08:00, 11:00 et 15:00 UTC\n")
+    print("Publication feed/reel planifiee a 09:00 (alternee un jour sur deux)")
+    print("Stories planifiees a 12:30, 19:30\n")
     threading.Thread(target=start_flask_server, daemon=True).start()
     print(f"Serveur video demarre sur le port {os.environ.get('PORT', 8080)}\n")
     try:
