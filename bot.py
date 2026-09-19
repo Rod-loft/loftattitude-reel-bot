@@ -23,11 +23,6 @@ OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 FB_PAGE_ID   = os.environ.get("FB_PAGE_ID", "100063636817093")
 FB_TOKEN     = os.environ.get("FB_PAGE_TOKEN", "")
 IG_BASE      = "https://graph.instagram.com/v21.0"
-IG_BASE      = "https://graph.instagram.com/v21.0"
-FB_BASE      = "https://graph.facebook.com/v21.0"
-DATA_DIR = "/data" if os.path.isdir("/data") and os.access("/data", os.W_OK) else "/tmp"
-HISTORY_FILE = os.path.join(DATA_DIR, "published_products.json")
-STORY_HISTORY_FILE = os.path.join(DATA_DIR, "published_stories.json")
 IG_AUDIO_BASE = "https://graph.facebook.com/v22.0"
 FB_BASE      = "https://graph.facebook.com/v21.0"
 DATA_DIR = "/data" if os.path.isdir("/data") and os.access("/data", os.W_OK) else "/tmp"
@@ -73,9 +68,6 @@ STORY_BRAND_URLS = [
     "https://www.loftattitude.com/fr/brand/55-socadis",
 ]
 STORY_MIN_PRICE = 100.0
-STORY_SLIDE_COUNT = 8
-STORY_SLIDE_DURATION = 1.7
-STORY_MAX_AI_GENERATIONS = 2
 STORY_SLIDE_COUNT = 8
 STORY_SLIDE_DURATION = 1.7
 STORY_SINGLE_DURATION = 8.0
@@ -157,12 +149,6 @@ def save_story_history(history):
 def already_in_story(product_url):
     return product_url in load_story_history()
 
-def mark_as_storied(product_url):
-    history = load_story_history()
-    if product_url not in history:
-        history.append(product_url)
-        save_story_history(history)
-    print(f"Produit marque comme publie en story: {product_url}")
 def mark_as_storied(product_url):
     history = load_story_history()
     if product_url not in history:
@@ -894,7 +880,6 @@ def build_story_slideshow(products):
             with open(slide_path, "wb") as f:
                 f.write(slide_bytes)
             slide_duration = STORY_SINGLE_DURATION if len(products) == 1 else STORY_SLIDE_DURATION
-            clips.append(ImageClip(slide_path).with_duration(STORY_SLIDE_DURATION))
             clips.append(ImageClip(slide_path).with_duration(slide_duration))
         except Exception as e:
             print(f"Erreur slide {i}: {e}")
@@ -916,7 +901,6 @@ def build_story_slideshow(products):
         filename = f"story_{int(time.time())}.mp4"
         output_path = os.path.join(STORY_VIDEO_DIR, filename)
         video.write_videofile(
-            output_path, fps=15, codec="libx264", audio_codec="aac",
             output_path, fps=24, codec="libx264", audio_codec="aac",
             preset="ultrafast", threads=1, bitrate="3000k", logger=None,
         )
@@ -1086,16 +1070,6 @@ def story_job():
             fb_ok = publish_facebook_story_video(video_url)
             print("Facebook Story: OK" if fb_ok else "Facebook Story: ECHEC")
         else:
-        # Prepare uniquement la photo lifestyle en 9:16, sans aucun overlay
-        try:
-            r = get_scrape_session().get(selected_image_url, timeout=15)
-            if r.status_code != 200 or not r.content:
-                print("Echec telechargement image story.")
-                return
-            story_img = crop_to_916(r.content)
-        except Exception as e:
-            print(f"Erreur preparation image story: {e}")
-            return
             print("Video Story indisponible; repli sur une image Instagram sans musique.")
             try:
                 r = get_scrape_session().get(selected_image_url, timeout=15)
@@ -1112,18 +1086,6 @@ def story_job():
         if ig_ok:
             mark_as_storied(selected_product["url"])
         print(f"Story: Instagram={'OK' if ig_ok else 'ECHEC'} | Facebook={'OK' if fb_ok else 'ECHEC'}")
-
-        # Upload sur imgbb
-        public_url = upload_to_imgbb(story_img)
-        if not public_url:
-            print("Echec upload image story.")
-            return
-
-        # Publie la Story
-        ok = publish_instagram_story_image(public_url)
-        if ok:
-            mark_as_storied(selected_product["url"])
-        print(f"Story: {'OK' if ok else 'ECHEC'}")
 
     except Exception as e:
         print(f"Erreur story_job (ignoree, le bot continue): {e}")
@@ -1400,7 +1362,6 @@ def build_reel_video(image_urls):
         filename = f"reel_{int(time.time())}.mp4"
         output_path = os.path.join(STORY_VIDEO_DIR, filename)
         video.write_videofile(
-            output_path, fps=15, codec="libx264", audio_codec="aac",
             output_path, fps=24, codec="libx264", audio_codec="aac",
             preset="ultrafast", threads=1, bitrate="3000k", logger=None,
         )
@@ -1409,16 +1370,6 @@ def build_reel_video(image_urls):
         print(f"Erreur encodage reel: {e}")
         return None
 
-def publish_instagram_reel(video_url, caption):
-    if not video_url or not IG_TOKEN:
-        return False
-    r1 = requests.post(f"{IG_BASE}/{IG_USER_ID}/media", data={
-        "video_url": video_url, "media_type": "REELS", "caption": caption, "access_token": IG_TOKEN,
-    })
-    result1 = r1.json()
-    if "id" not in result1:
-        print(f"Erreur creation reel: {result1}")
-        return False
 def publish_instagram_reel(video_url, caption):
     if not video_url or not IG_TOKEN:
         return False
@@ -1466,9 +1417,6 @@ def publish_instagram_reel(video_url, caption):
     creation_id = result1["id"]
     for attempt in range(20):
         time.sleep(10)
-        status_r = requests.get(f"{IG_BASE}/{creation_id}", params={
-            "fields": "status_code", "access_token": IG_TOKEN,
-        })
         status_r = requests.get(f"{publish_base}/{creation_id}", params={
             "fields": "status_code", "access_token": publish_token,
         }, timeout=20)
@@ -1482,16 +1430,10 @@ def publish_instagram_reel(video_url, caption):
     else:
         print("Timeout traitement reel.")
         return False
-    r2 = requests.post(f"{IG_BASE}/{IG_USER_ID}/media_publish", data={
-        "creation_id": creation_id, "access_token": IG_TOKEN,
-    })
     r2 = requests.post(f"{publish_base}/{IG_USER_ID}/media_publish", data={
         "creation_id": creation_id, "access_token": publish_token,
     }, timeout=30)
     result2 = r2.json()
-    if "id" in result2:
-        print(f"Reel Instagram OK ! ID: {result2['id']}")
-        return True
     if "id" in result2:
         print(f"Reel Instagram OK ! ID: {result2['id']}")
         if audio_id:
@@ -1500,23 +1442,6 @@ def publish_instagram_reel(video_url, caption):
     print(f"Erreur publication reel: {result2}")
     return False
 
-def publish_facebook_reel(video_url, caption):
-    if not FB_PAGE_ID or not FB_TOKEN:
-        print("Facebook non configure - FB_PAGE_ID ou FB_PAGE_TOKEN manquant")
-        return False
-    try:
-        r = requests.post(f"{FB_BASE}/{FB_PAGE_ID}/videos", data={
-            "file_url": video_url, "description": caption, "access_token": FB_TOKEN,
-        })
-        result = r.json()
-        if "id" in result:
-            print(f"Facebook video OK ! ID: {result['id']}")
-            return True
-        print(f"Erreur Facebook video: {result}")
-        return False
-    except Exception as e:
-        print(f"Erreur Facebook video: {e}")
-        return False
 def _publish_facebook_vertical_video(video_url, edge, label, description=""):
     """Publie une video verticale via le protocole START/upload/FINISH de Meta."""
     if not FB_PAGE_ID or not FB_TOKEN:
@@ -1667,24 +1592,12 @@ if __name__ == "__main__":
     print(f"FB_PAGE_ID:  {FB_PAGE_ID}")
     print(f"IMGBB:       {'OK' if IMGBB_KEY else 'MANQUANT'}")
     print(f"Token IG:    {'OK' if IG_TOKEN else 'MANQUANT'}")
-    print(f"Token IG:    {'OK' if IG_TOKEN else 'MANQUANT'}")
     print(f"Audio IG:    {'NATIF' if IG_NATIVE_AUDIO_TOKEN else 'LOCAL (IG_NATIVE_AUDIO_TOKEN manquant)'}")
     print(f"OpenAI:      {'OK' if OPENAI_KEY else 'MANQUANT'} ({OPENAI_MODEL})")
-    print("Publication feed/reel planifiee a 07:00 UTC (alternee un jour sur deux)")
-    print("Stories planifiees a 08:00, 11:00 et 15:00 UTC\n")
     print("Publication feed/reel planifiee a 09:00 (alternee un jour sur deux)")
     print("Stories planifiees a 12:30, 19:30\n")
     threading.Thread(target=start_flask_server, daemon=True).start()
     print(f"Serveur video demarre sur le port {os.environ.get('PORT', 8080)}\n")
-    try:
-        daily_dispatch_job()
-    except Exception as e:
-        print(f"Erreur dispatch au demarrage (ignoree): {e}")
-    if os.environ.get("TEST_STORY_NOW") == "1":
-        print("\nTEST_STORY_NOW=1 detecte -> declenchement story manuel\n")
-        story_job()
-    if os.environ.get("TEST_REEL_NOW") == "1":
-        print("\nTEST_REEL_NOW=1 detecte -> declenchement reel manuel\n")
     print("Aucune publication automatique au redemarrage; attente des horaires planifies.")
     if should_run_manual_test("TEST_STORY_NOW"):
         print("\nTEST_STORY_NOW=1 detecte -> declenchement story manuel\n")
