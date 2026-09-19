@@ -34,6 +34,7 @@ DATA_DIR = "/data" if os.path.isdir("/data") and os.access("/data", os.W_OK) els
 HISTORY_FILE = os.path.join(DATA_DIR, "published_products.json")
 STORY_HISTORY_FILE = os.path.join(DATA_DIR, "published_stories.json")
 REEL_AUDIO_HISTORY_FILE = os.path.join(DATA_DIR, "published_reel_audio.json")
+MANUAL_TEST_STATE_FILE = os.path.join(DATA_DIR, "manual_test_state.json")
 
 # Audios Instagram choisis par Loft Attitude. Meta controle leur disponibilite
 # pour les comptes professionnels au moment de la publication.
@@ -74,6 +75,10 @@ STORY_BRAND_URLS = [
 STORY_MIN_PRICE = 100.0
 STORY_SLIDE_COUNT = 8
 STORY_SLIDE_DURATION = 1.7
+STORY_MAX_AI_GENERATIONS = 2
+STORY_SLIDE_COUNT = 8
+STORY_SLIDE_DURATION = 1.7
+STORY_SINGLE_DURATION = 8.0
 STORY_MAX_AI_GENERATIONS = 2
 REEL_SLIDE_DURATION = 2.5
 STORY_VIDEO_DIR = "/tmp/story_videos"
@@ -184,6 +189,32 @@ def mark_reel_audio_used(audio_id):
     history = [value for value in load_reel_audio_history() if value != audio_id]
     history.append(audio_id)
     save_reel_audio_history(history)
+
+
+def should_run_manual_test(env_name):
+    """Ne consomme qu'une fois un drapeau TEST_*=1, meme apres un redemarrage."""
+    enabled = os.environ.get(env_name, "").strip() == "1"
+    try:
+        with open(MANUAL_TEST_STATE_FILE, "r") as f:
+            state = json.load(f)
+        if not isinstance(state, dict):
+            state = {}
+    except Exception:
+        state = {}
+
+    previous = state.get(env_name) == "1"
+    new_value = "1" if enabled else "0"
+    if state.get(env_name) != new_value:
+        state[env_name] = new_value
+        try:
+            with open(MANUAL_TEST_STATE_FILE, "w") as f:
+                json.dump(state, f)
+        except Exception as e:
+            print(f"Erreur sauvegarde etat test manuel: {e}")
+
+    if enabled and previous:
+        print(f"{env_name}=1 deja consomme - test non relance apres redemarrage.")
+    return enabled and not previous
 
 def select_available_instagram_audio():
     """Choisit un audio natif autorise par Meta, sans repetition rapprochee."""
@@ -862,7 +893,9 @@ def build_story_slideshow(products):
             slide_path = os.path.join(STORY_SLIDES_DIR, f"slide_{i}_{int(time.time())}.jpg")
             with open(slide_path, "wb") as f:
                 f.write(slide_bytes)
+            slide_duration = STORY_SINGLE_DURATION if len(products) == 1 else STORY_SLIDE_DURATION
             clips.append(ImageClip(slide_path).with_duration(STORY_SLIDE_DURATION))
+            clips.append(ImageClip(slide_path).with_duration(slide_duration))
         except Exception as e:
             print(f"Erreur slide {i}: {e}")
     if not clips:
@@ -884,6 +917,7 @@ def build_story_slideshow(products):
         output_path = os.path.join(STORY_VIDEO_DIR, filename)
         video.write_videofile(
             output_path, fps=15, codec="libx264", audio_codec="aac",
+            output_path, fps=24, codec="libx264", audio_codec="aac",
             preset="ultrafast", threads=1, bitrate="3000k", logger=None,
         )
         return filename
@@ -1033,6 +1067,25 @@ def story_job():
         print(f"\nProduit retenu: {selected_product['nom']}")
         print(f"Photo lifestyle: {selected_image_url[-70:]}")
 
+        # Une Story image ne peut pas recevoir de musique via l'API. On fabrique
+        # donc une courte video 9:16 avec la piste locale integree, sans texte.
+        story_product = dict(selected_product)
+        story_product["image_url"] = selected_image_url
+        filename = build_story_slideshow([story_product])
+        base_url = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+
+        ig_ok = False
+        fb_ok = False
+        if filename and base_url:
+            video_url = f"{base_url}/video/{filename}"
+            print(f"Story video hebergee: {video_url}")
+            print("\n--- INSTAGRAM STORY ---")
+            ig_ok = publish_instagram_story_video(video_url)
+            print("Instagram Story: OK" if ig_ok else "Instagram Story: ECHEC")
+            print("\n--- FACEBOOK STORY ---")
+            fb_ok = publish_facebook_story_video(video_url)
+            print("Facebook Story: OK" if fb_ok else "Facebook Story: ECHEC")
+        else:
         # Prepare uniquement la photo lifestyle en 9:16, sans aucun overlay
         try:
             r = get_scrape_session().get(selected_image_url, timeout=15)
@@ -1043,6 +1096,22 @@ def story_job():
         except Exception as e:
             print(f"Erreur preparation image story: {e}")
             return
+            print("Video Story indisponible; repli sur une image Instagram sans musique.")
+            try:
+                r = get_scrape_session().get(selected_image_url, timeout=15)
+                if r.status_code != 200 or not r.content:
+                    print("Echec telechargement image story.")
+                    return
+                public_url = upload_to_imgbb(crop_to_916(r.content))
+                if public_url:
+                    ig_ok = publish_instagram_story_image(public_url)
+                    fb_ok = publish_facebook_story_image(public_url)
+            except Exception as e:
+                print(f"Erreur repli image story: {e}")
+
+        if ig_ok:
+            mark_as_storied(selected_product["url"])
+        print(f"Story: Instagram={'OK' if ig_ok else 'ECHEC'} | Facebook={'OK' if fb_ok else 'ECHEC'}")
 
         # Upload sur imgbb
         public_url = upload_to_imgbb(story_img)
@@ -1332,6 +1401,7 @@ def build_reel_video(image_urls):
         output_path = os.path.join(STORY_VIDEO_DIR, filename)
         video.write_videofile(
             output_path, fps=15, codec="libx264", audio_codec="aac",
+            output_path, fps=24, codec="libx264", audio_codec="aac",
             preset="ultrafast", threads=1, bitrate="3000k", logger=None,
         )
         return filename
@@ -1447,6 +1517,95 @@ def publish_facebook_reel(video_url, caption):
     except Exception as e:
         print(f"Erreur Facebook video: {e}")
         return False
+def _publish_facebook_vertical_video(video_url, edge, label, description=""):
+    """Publie une video verticale via le protocole START/upload/FINISH de Meta."""
+    if not FB_PAGE_ID or not FB_TOKEN:
+        print("Facebook non configure - FB_PAGE_ID ou FB_PAGE_TOKEN manquant")
+        return False
+    try:
+        start = requests.post(
+            f"{FB_BASE}/{FB_PAGE_ID}/{edge}",
+            data={"upload_phase": "start", "access_token": FB_TOKEN},
+            timeout=30,
+        ).json()
+        video_id = start.get("video_id")
+        upload_url = start.get("upload_url")
+        if not video_id or not upload_url:
+            print(f"Erreur initialisation {label} Facebook: {start}")
+            return False
+
+        upload_response = requests.post(
+            upload_url,
+            headers={"Authorization": f"OAuth {FB_TOKEN}", "file_url": video_url},
+            timeout=120,
+        )
+        upload_result = upload_response.json()
+        if not upload_response.ok or not upload_result.get("success"):
+            print(f"Erreur upload {label} Facebook: {upload_result}")
+            return False
+
+        finish_data = {
+            "upload_phase": "finish",
+            "video_id": video_id,
+            "video_state": "PUBLISHED",
+            "access_token": FB_TOKEN,
+        }
+        if description:
+            finish_data["description"] = description
+        finish = requests.post(
+            f"{FB_BASE}/{FB_PAGE_ID}/{edge}", data=finish_data, timeout=30
+        ).json()
+        if finish.get("success") or finish.get("post_id"):
+            print(f"{label} Facebook OK ! video_id={video_id}")
+            return True
+        print(f"Erreur publication {label} Facebook: {finish}")
+        return False
+    except Exception as e:
+        print(f"Erreur {label} Facebook: {e}")
+        return False
+
+
+def publish_facebook_reel(video_url, caption):
+    return _publish_facebook_vertical_video(
+        video_url, "video_reels", "Reel", description=caption
+    )
+
+
+def publish_facebook_story_video(video_url):
+    return _publish_facebook_vertical_video(video_url, "video_stories", "Story")
+
+
+def publish_facebook_story_image(image_url):
+    """Repli Facebook pour une Story image lorsque la video ne peut pas etre creee."""
+    if not FB_PAGE_ID or not FB_TOKEN:
+        return False
+    try:
+        photo = requests.post(
+            f"{FB_BASE}/{FB_PAGE_ID}/photos",
+            data={
+                "url": image_url,
+                "published": "false",
+                "access_token": FB_TOKEN,
+            },
+            timeout=30,
+        ).json()
+        photo_id = photo.get("id")
+        if not photo_id:
+            print(f"Erreur upload photo Story Facebook: {photo}")
+            return False
+        result = requests.post(
+            f"{FB_BASE}/{FB_PAGE_ID}/photo_stories",
+            data={"photo_id": photo_id, "access_token": FB_TOKEN},
+            timeout=30,
+        ).json()
+        if result.get("success") or result.get("post_id"):
+            print(f"Story image Facebook OK ! photo_id={photo_id}")
+            return True
+        print(f"Erreur publication Story image Facebook: {result}")
+        return False
+    except Exception as e:
+        print(f"Erreur Story image Facebook: {e}")
+        return False
 
 def reel_job():
     """Ne doit jamais lever d'exception : un echec ici ne doit pas arreter le bot."""
@@ -1525,6 +1684,12 @@ if __name__ == "__main__":
         print("\nTEST_STORY_NOW=1 detecte -> declenchement story manuel\n")
         story_job()
     if os.environ.get("TEST_REEL_NOW") == "1":
+        print("\nTEST_REEL_NOW=1 detecte -> declenchement reel manuel\n")
+    print("Aucune publication automatique au redemarrage; attente des horaires planifies.")
+    if should_run_manual_test("TEST_STORY_NOW"):
+        print("\nTEST_STORY_NOW=1 detecte -> declenchement story manuel\n")
+        story_job()
+    if should_run_manual_test("TEST_REEL_NOW"):
         print("\nTEST_REEL_NOW=1 detecte -> declenchement reel manuel\n")
         reel_job()
     # Railway tourne en UTC. Paris = UTC+1 en hiver, UTC+2 en ete (heure d'ete).
