@@ -1000,6 +1000,7 @@ def find_lifestyle_image_for_product(product):
         print(f"  Meilleure photo lifestyle trouvee (score={best_score}): {best_url[-60:]}")
     else:
         print(f"  Aucune photo lifestyle trouvee pour: {product['nom']} — produit ignore")
+        print(f"  Aucune photo lifestyle trouvee pour: {product['nom']} - produit ignore")
     return best_url
 
 def publish_instagram_story_image(image_url):
@@ -1037,6 +1038,7 @@ def story_job():
     - Aucun bandeau, degrade, nom, prix ou texte incruste sur l'image
     - Ne leve jamais d'exception pour ne pas bloquer le bot
     """
+    """Publie une Story lifestyle sans texte ni musique locale."""
     try:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"\n{'-'*50}\n[{now}] Story Loft Attitude (1 photo lifestyle)\n{'-'*50}")
