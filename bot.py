@@ -75,23 +75,6 @@ STORY_MAX_AI_GENERATIONS = 2
 REEL_SLIDE_DURATION = 2.5
 STORY_VIDEO_DIR = "/tmp/story_videos"
 STORY_SLIDES_DIR = "/tmp/story_slides"
-def _resolve_music_path():
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        os.path.join(base_dir, "assets", "story_music.mp3"),
-        os.path.join(base_dir, "story_music.mp3"),
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            return path
-    return candidates[0]
-REEL_SLIDE_DURATION = 2.5
-STORY_VIDEO_DIR = "/tmp/story_videos"
-STORY_SLIDES_DIR = "/tmp/story_slides"
-os.makedirs(STORY_VIDEO_DIR, exist_ok=True)
-os.makedirs(STORY_SLIDES_DIR, exist_ok=True)
-
-MUSIC_PATH = _resolve_music_path()
 os.makedirs(STORY_VIDEO_DIR, exist_ok=True)
 os.makedirs(STORY_SLIDES_DIR, exist_ok=True)
 
@@ -219,7 +202,6 @@ def select_available_instagram_audio():
     random.shuffle(fallback)
 
     # Quelques essais suffisent; en cas d'indisponibilite globale, le Reel
-    # est publie avec la musique locale deja integree a la video.
     # est publie sans son plutot qu'avec l'ancienne musique locale.
     for audio_id in (preferred + fallback)[:5]:
         try:
@@ -869,8 +851,6 @@ def get_story_candidates(n=STORY_SLIDE_COUNT):
 
 def build_story_slideshow(products):
     """Construit une video verticale (9:16) enchainant les photos des produits,
-    sans texte incruste, avec une musique d'ambiance."""
-    from moviepy import ImageClip, concatenate_videoclips, AudioFileClip, afx
     sans texte incruste et sans piste audio locale."""
     from moviepy import ImageClip, concatenate_videoclips
     clips = []
@@ -891,27 +871,6 @@ def build_story_slideshow(products):
             clips.append(ImageClip(slide_path).with_duration(slide_duration))
         except Exception as e:
             print(f"Erreur slide {i}: {e}")
-    if not clips:
-        return None
-    try:
-        video = concatenate_videoclips(clips, method="compose")
-        if os.path.exists(MUSIC_PATH):
-            try:
-                audio = AudioFileClip(MUSIC_PATH)
-                duration = min(video.duration, audio.duration)
-                audio = audio.subclipped(0, duration)
-                audio = audio.with_effects([afx.AudioFadeOut(1.0)])
-                video = video.with_duration(duration).with_audio(audio)
-            except Exception as e:
-                print(f"Erreur ajout musique: {e}")
-        else:
-            print(f"Musique introuvable a {MUSIC_PATH}, video sans son.")
-        filename = f"story_{int(time.time())}.mp4"
-        output_path = os.path.join(STORY_VIDEO_DIR, filename)
-        video.write_videofile(
-            output_path, fps=24, codec="libx264", audio_codec="aac",
-            preset="ultrafast", threads=1, bitrate="3000k", logger=None,
-        )
     if not clips:
         return None
     try:
@@ -999,7 +958,6 @@ def find_lifestyle_image_for_product(product):
     if best_url:
         print(f"  Meilleure photo lifestyle trouvee (score={best_score}): {best_url[-60:]}")
     else:
-        print(f"  Aucune photo lifestyle trouvee pour: {product['nom']} — produit ignore")
         print(f"  Aucune photo lifestyle trouvee pour: {product['nom']} - produit ignore")
     return best_url
 
@@ -1029,15 +987,6 @@ def publish_instagram_story_image(image_url):
     return False
 
 def story_job():
-    """
-    Publie UNE seule Story Instagram avec UNE photo lifestyle.
-    Regles :
-    - 1 photo par Story, jamais de diaporama ou montage
-    - Uniquement des photos lifestyle (interieur, ambiance) — jamais de fond blanc
-    - Si aucune photo lifestyle dispo pour un produit, on essaie le suivant
-    - Aucun bandeau, degrade, nom, prix ou texte incruste sur l'image
-    - Ne leve jamais d'exception pour ne pas bloquer le bot
-    """
     """Publie une Story lifestyle sans texte ni musique locale."""
     try:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1072,8 +1021,6 @@ def story_job():
         print(f"\nProduit retenu: {selected_product['nom']}")
         print(f"Photo lifestyle: {selected_image_url[-70:]}")
 
-        # Une Story image ne peut pas recevoir de musique via l'API. On fabrique
-        # donc une courte video 9:16 avec la piste locale integree, sans texte.
         # L'API Meta ne permet pas de choisir une musique Instagram pour une
         # Story. On fabrique donc une courte video 9:16 silencieuse, sans texte.
         story_product = dict(selected_product)
@@ -1352,8 +1299,6 @@ def daily_job():
     print(f"\nResultat: Instagram={'OK' if ig_ok else 'ECHEC'} | Facebook={'OK' if fb_ok else 'ECHEC'}")
 
 def build_reel_video(image_urls):
-    """Construit un Reel 9:16 sur fond blanc, avec musique et sans overlay."""
-    from moviepy import ImageClip, concatenate_videoclips, AudioFileClip, afx
     """Construit un Reel 9:16 silencieux; Meta ajoutera l'audio natif Instagram."""
     from moviepy import ImageClip, concatenate_videoclips
     clips = []
@@ -1369,27 +1314,6 @@ def build_reel_video(image_urls):
             clips.append(ImageClip(slide_path).with_duration(REEL_SLIDE_DURATION))
         except Exception as e:
             print(f"Erreur slide reel {i}: {e}")
-    if not clips:
-        return None
-    try:
-        video = concatenate_videoclips(clips, method="compose")
-        if os.path.exists(MUSIC_PATH):
-            try:
-                audio = AudioFileClip(MUSIC_PATH)
-                duration = min(video.duration, audio.duration)
-                audio = audio.subclipped(0, duration)
-                audio = audio.with_effects([afx.AudioFadeOut(1.0)])
-                video = video.with_duration(duration).with_audio(audio)
-            except Exception as e:
-                print(f"Erreur ajout musique reel: {e}")
-        else:
-            print(f"Musique introuvable a {MUSIC_PATH}, reel sans son.")
-        filename = f"reel_{int(time.time())}.mp4"
-        output_path = os.path.join(STORY_VIDEO_DIR, filename)
-        video.write_videofile(
-            output_path, fps=24, codec="libx264", audio_codec="aac",
-            preset="ultrafast", threads=1, bitrate="3000k", logger=None,
-        )
     if not clips:
         return None
     try:
@@ -1422,9 +1346,6 @@ def publish_instagram_reel(video_url, caption):
             "audio_configuration": json.dumps({
                 "audio_id": audio_id,
                 "audio_volume": 100,
-                # La video contient la musique locale destinee a Facebook.
-                # On la rend quasi inaudible sur Instagram pour eviter un mix.
-                "video_volume": 1,
                 # La video source est silencieuse : seule la piste Instagram
                 # selectionnee dans la rotation doit etre audible.
                 "video_volume": 0,
@@ -1439,7 +1360,6 @@ def publish_instagram_reel(video_url, caption):
             publish_base = IG_AUDIO_BASE
             publish_token = IG_NATIVE_AUDIO_TOKEN
         else:
-            print(f"Audio natif refuse, repli sur la musique locale: {result1}")
             print(f"Audio natif refuse, publication du Reel sans son: {result1}")
             audio_id = None
 
