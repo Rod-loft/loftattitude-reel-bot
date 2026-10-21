@@ -227,6 +227,119 @@ def select_available_instagram_audio():
 
 # ─── TRAITEMENT IMAGE ─────────────────────────────────────────────────────────
 
+def _replace_edge_black_matte_with_white(img, threshold=48):
+    """Remplace un fond noir technique relie aux bords par du blanc.
+
+    Cette securite vise les anciens detourages enregistres sans canal alpha.
+    Elle ne s'active que si la quasi-totalite du pourtour est noire et si la
+    zone noire occupe une part importante de l'image, afin de ne pas modifier
+    une vraie photo d'ambiance sombre.
+    """
+    try:
+        rgb = img.convert("RGB")
+        arr = np.asarray(rgb)
+        if arr.size == 0:
+            return rgb
+
+        dark = np.max(arr, axis=2) <= threshold
+        perimeter = np.concatenate((dark[0, :], dark[-1, :], dark[:, 0], dark[:, -1]))
+        if float(perimeter.mean()) < 0.80 or float(dark.mean()) < 0.18:
+            return rgb
+
+        # Le masque binaire permet de ne blanchir que le noir connecte aux
+        # bords. Les parties sombres du produit, isolees au centre, sont gardees.
+        # copy() rend le buffer PIL modifiable pour ImageDraw.floodfill.
+        flood = Image.fromarray(
+            np.where(dark, 0, 255).astype(np.uint8), mode="L"
+        ).copy()
+        width, height = flood.size
+        step = max(1, min(width, height) // 40)
+        seeds = []
+        for x in range(0, width, step):
+            seeds.extend(((x, 0), (x, height - 1)))
+        for y in range(0, height, step):
+            seeds.extend(((0, y), (width - 1, y)))
+        seeds.extend(((0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)))
+
+        for seed in seeds:
+            if flood.getpixel(seed) == 0:
+                ImageDraw.floodfill(flood, seed, 128, thresh=0)
+
+        connected = np.asarray(flood) == 128
+        if float(connected.mean()) < 0.18:
+            return rgb
+
+        # Un tres leger elargissement absorbe le halo noir d'anti-crenelage.
+        matte_mask = Image.fromarray((connected.astype(np.uint8) * 255), mode="L")
+        matte_mask = matte_mask.filter(ImageFilter.MaxFilter(3))
+        white = Image.new("RGB", rgb.size, (255, 255, 255))
+        cleaned = Image.composite(white, rgb, matte_mask)
+        print(f"  Fond noir technique remplace par du blanc ({connected.mean():.0%} de l'image)")
+        return cleaned
+    except Exception as e:
+        print(f"  Erreur suppression fond noir: {e}")
+        return img.convert("RGB")
+
+
+def _open_rgb_on_white(image_bytes, remove_black_matte=False):
+    """Ouvre une image en conservant son alpha, compose sur blanc, puis passe en RGB."""
+    source = Image.open(io.BytesIO(image_bytes))
+    source = ImageOps.exif_transpose(source)
+    has_alpha = "A" in source.getbands() or "transparency" in source.info
+    if has_alpha:
+        rgba = source.convert("RGBA")
+        white = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        white.alpha_composite(rgba)
+        img = white.convert("RGB")
+        print("  Transparence composee sur fond blanc")
+    else:
+        img = source.convert("RGB")
+    if remove_black_matte:
+        img = _replace_edge_black_matte_with_white(img)
+    return img
+
+
+def trim_near_white_edge_bands(img, threshold=242, min_coverage=0.94, max_ratio=0.10):
+    """Rogne les fines bandes blanches uniformes collees aux quatre bords."""
+    try:
+        rgb = img.convert("RGB")
+        arr = np.asarray(rgb)
+        if arr.size == 0:
+            return rgb
+
+        channel_min = np.min(arr, axis=2)
+        channel_max = np.max(arr, axis=2)
+        near_white = (channel_min >= threshold) & ((channel_max - channel_min) <= 18)
+        height, width = near_white.shape
+        max_y = max(1, int(height * max_ratio))
+        max_x = max(1, int(width * max_ratio))
+
+        top = 0
+        while top < max_y and float(near_white[top, :].mean()) >= min_coverage:
+            top += 1
+        bottom = height
+        while bottom > height - max_y and float(near_white[bottom - 1, :].mean()) >= min_coverage:
+            bottom -= 1
+        left = 0
+        while left < max_x and float(near_white[:, left].mean()) >= min_coverage:
+            left += 1
+        right = width
+        while right > width - max_x and float(near_white[:, right - 1].mean()) >= min_coverage:
+            right -= 1
+
+        if left >= right or top >= bottom:
+            return rgb
+        if top or bottom < height or left or right < width:
+            print(
+                "  Fines bandes blanches supprimees "
+                f"(haut:{top} bas:{height-bottom} gauche:{left} droite:{width-right})"
+            )
+            return rgb.crop((left, top, right, bottom))
+        return rgb
+    except Exception as e:
+        print(f"  Erreur suppression bandes fines: {e}")
+        return img.convert("RGB")
+
 def trim_white_borders(img, threshold=230, min_band=30):
     """Supprime uniquement les vraies bandes blanches larges (>30px)"""
     try:
@@ -275,8 +388,10 @@ def is_white_background(img, threshold=242, min_ratio=0.35):
 def _fit_on_white_canvas(image_bytes, target_size, margin_ratio=0.055):
     """Place une photo de produit entiere sur un fond blanc, sans deformation."""
     try:
-        source = Image.open(io.BytesIO(image_bytes))
-        img = ImageOps.exif_transpose(source).convert("RGB")
+        # Un simple convert("RGB") transforme les pixels transparents en noir.
+        # On compose donc d'abord l'alpha sur blanc et l'on corrige aussi les
+        # anciens fichiers dont le fond noir a deja ete enregistre dans l'image.
+        img = _open_rgb_on_white(image_bytes, remove_black_matte=True)
         if img.width <= 0 or img.height <= 0:
             return image_bytes
 
@@ -386,14 +501,17 @@ def crop_to_916(image_bytes):
     grandes marges blanches, bandeau, degrade sombre ni texte incruste.
     """
     try:
-        source = Image.open(io.BytesIO(image_bytes))
-        img = ImageOps.exif_transpose(source).convert("RGB")
+        img = _open_rgb_on_white(image_bytes)
         w, h = img.size
         if w <= 0 or h <= 0:
             return image_bytes
 
-        # Retire uniquement les bordures blanches techniques eventuelles avant
-        # le cadrage ; aucune marge blanche n'est ensuite recreee.
+        # Les fines bandes techniques doivent etre retirees meme si la photo
+        # lifestyle n'a pas globalement un fond blanc.
+        img = trim_near_white_edge_bands(img)
+        w, h = img.size
+
+        # Retire ensuite les bordures blanches plus larges des images produit.
         if is_white_background(img):
             trimmed = trim_white_borders(img)
             if trimmed.size[0] > 0 and trimmed.size[1] > 0:
@@ -474,8 +592,22 @@ def compose_product_on_scene(product_image_bytes, background_bytes, target_w=900
         bg = Image.open(io.BytesIO(background_bytes)).convert("RGB")
         bg = bg.resize((target_w, target_h), Image.LANCZOS)
 
-        product = Image.open(io.BytesIO(product_image_bytes)).convert("RGB")
-        product = trim_white_borders(product)
+        product_source = Image.open(io.BytesIO(product_image_bytes))
+        product_source = ImageOps.exif_transpose(product_source)
+        product_has_alpha = (
+            "A" in product_source.getbands() or "transparency" in product_source.info
+        )
+        product_alpha = None
+        if product_has_alpha:
+            product_rgba = product_source.convert("RGBA")
+            alpha_bbox = product_rgba.getchannel("A").getbbox()
+            if alpha_bbox:
+                product_rgba = product_rgba.crop(alpha_bbox)
+            product = product_rgba.convert("RGB")
+            product_alpha = product_rgba.getchannel("A")
+        else:
+            product = _replace_edge_black_matte_with_white(product_source.convert("RGB"))
+            product = trim_white_borders(product)
         pw, ph = product.size
         if pw <= 0 or ph <= 0:
             return None
@@ -486,10 +618,13 @@ def compose_product_on_scene(product_image_bytes, background_bytes, target_w=900
         new_w, new_h = max(1, int(pw * scale)), max(1, int(ph * scale))
         product_resized = product.resize((new_w, new_h), Image.LANCZOS)
 
-        # Masque = tout ce qui n'est pas presque blanc, pour un collage propre sans halo
-        gray = product_resized.convert("L")
-        mask = gray.point(lambda p: 255 if p < 245 else 0)
-        mask = mask.filter(ImageFilter.MaxFilter(3))
+        if product_alpha is not None:
+            mask = product_alpha.resize((new_w, new_h), Image.LANCZOS)
+        else:
+            # Pour les anciens JPEG sans alpha, masque tout ce qui est presque blanc.
+            gray = product_resized.convert("L")
+            mask = gray.point(lambda p: 255 if p < 245 else 0)
+            mask = mask.filter(ImageFilter.MaxFilter(3))
 
         pos_x = (target_w - new_w) // 2
         pos_y = int(target_h * 0.60) - new_h // 2
