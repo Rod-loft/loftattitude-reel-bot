@@ -299,39 +299,101 @@ def _open_rgb_on_white(image_bytes, remove_black_matte=False):
     return img
 
 
-def trim_near_white_edge_bands(img, threshold=242, min_coverage=0.94, max_ratio=0.10):
-    """Rogne les fines bandes blanches uniformes collees aux quatre bords."""
+def trim_near_white_edge_bands(
+    img, threshold=238, min_coverage=0.82, max_ratio=0.40,
+    edge_tolerance_ratio=0.04,
+):
+    """Rogne les marges blanches techniques proches des quatre bords.
+
+    La detection tolere la compression JPEG, quelques lignes grises au bord et
+    des marges pouvant atteindre 40 % de l'image. Une vraie zone claire reste
+    conservee si elle n'est pas presque uniforme sur toute la largeur/hauteur.
+    """
     try:
         rgb = img.convert("RGB")
         arr = np.asarray(rgb)
         if arr.size == 0:
             return rgb
 
-        channel_min = np.min(arr, axis=2)
-        channel_max = np.max(arr, axis=2)
-        near_white = (channel_min >= threshold) & ((channel_max - channel_min) <= 18)
+        arr16 = arr.astype(np.int16)
+        channel_min = np.min(arr16, axis=2)
+        channel_max = np.max(arr16, axis=2)
+        luminance = np.mean(arr16, axis=2)
+        near_white = (
+            (luminance >= threshold)
+            & (channel_min >= threshold - 10)
+            & ((channel_max - channel_min) <= 30)
+        )
         height, width = near_white.shape
-        max_y = max(1, int(height * max_ratio))
-        max_x = max(1, int(width * max_ratio))
 
-        top = 0
-        while top < max_y and float(near_white[top, :].mean()) >= min_coverage:
-            top += 1
-        bottom = height
-        while bottom > height - max_y and float(near_white[bottom - 1, :].mean()) >= min_coverage:
-            bottom -= 1
-        left = 0
-        while left < max_x and float(near_white[:, left].mean()) >= min_coverage:
-            left += 1
-        right = width
-        while right > width - max_x and float(near_white[:, right - 1].mean()) >= min_coverage:
-            right -= 1
+        row_flags = (
+            (near_white.mean(axis=1) >= min_coverage)
+            & (luminance.mean(axis=1) >= threshold)
+        )
+        col_flags = (
+            (near_white.mean(axis=0) >= min_coverage)
+            & (luminance.mean(axis=0) >= threshold)
+        )
 
-        if left >= right or top >= bottom:
+        def leading_margin(flags, total_length):
+            """Renvoie la profondeur d'une bande proche du bord dans flags."""
+            max_scan = max(1, int(total_length * max_ratio))
+            tolerance = max(3, int(total_length * edge_tolerance_ratio))
+            min_run = max(2, int(total_length * 0.002))
+            max_gap = max(2, int(total_length * 0.004))
+            candidates = np.flatnonzero(flags[:max_scan])
+            if candidates.size == 0 or int(candidates[0]) > tolerance:
+                return 0
+
+            first = int(candidates[0])
+            last = first
+            white_count = 0
+            gap = 0
+            for index in range(first, max_scan):
+                if bool(flags[index]):
+                    last = index + 1
+                    white_count += 1
+                    gap = 0
+                else:
+                    gap += 1
+                    if gap > max_gap:
+                        break
+            if white_count < min_run:
+                return 0
+            # Inclut les quelques pixels gris eventuels places avant la marge.
+            return last
+
+        top = leading_margin(row_flags, height)
+        bottom_margin = leading_margin(row_flags[::-1], height)
+        left = leading_margin(col_flags, width)
+        right_margin = leading_margin(col_flags[::-1], width)
+
+        # Retire aussi les quelques pixels d'anti-crenelage situes juste apres
+        # la marge, afin qu'aucun filet blanc ne survive au redimensionnement.
+        bleed = max(2, int(min(width, height) * 0.003))
+        if top:
+            top = min(height, top + bleed)
+        if bottom_margin:
+            bottom_margin = min(height, bottom_margin + bleed)
+        if left:
+            left = min(width, left + bleed)
+        if right_margin:
+            right_margin = min(width, right_margin + bleed)
+        bottom = height - bottom_margin
+        right = width - right_margin
+
+        # Ne sacrifie jamais la zone centrale si une photo tres claire a ete
+        # prise par erreur pour une marge technique.
+        if (
+            left >= right
+            or top >= bottom
+            or (bottom - top) < int(height * 0.35)
+            or (right - left) < int(width * 0.35)
+        ):
             return rgb
         if top or bottom < height or left or right < width:
             print(
-                "  Fines bandes blanches supprimees "
+                "  Marges blanches supprimees "
                 f"(haut:{top} bas:{height-bottom} gauche:{left} droite:{width-right})"
             )
             return rgb.crop((left, top, right, bottom))
