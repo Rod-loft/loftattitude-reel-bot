@@ -955,6 +955,8 @@ def parse_price(text):
         return 0.0
 
 def get_story_candidates(n=STORY_SLIDE_COUNT):
+    if black_friday_active():
+        return [p for p in black_friday_products_today() if not already_in_story(p['url'])][:n]
     """Parcourt les 3 pages marques ciblees, filtre les produits >100€ pas encore en story,
     et renvoie un mix de n produits differents (marques melangees)."""
     try:
@@ -1258,6 +1260,8 @@ def story_job():
         print(f"Erreur story_job (ignoree, le bot continue): {e}")
 
 def get_next_product():
+    if black_friday_active():
+        return next((p for p in black_friday_products_today() if not already_published(p['url'])), None)
     try:
         session = get_scrape_session()
         base_url = "https://www.loftattitude.com/fr/nouveaux-produits"
@@ -1742,6 +1746,64 @@ def daily_dispatch_job():
     except Exception as e:
         print(f"Erreur dispatch quotidien (ignoree): {e}")
 
+def black_friday_active():
+    now = datetime.now(PARIS_TZ) if PARIS_TZ else datetime.now()
+    return '2026-10-31' <= now.strftime('%Y-%m-%d') <= '2026-11-30'
+
+
+def black_friday_products_today():
+    import csv
+    now = datetime.now(PARIS_TZ) if PARIS_TZ else datetime.now()
+    offset = (now.date() - datetime(2026, 10, 31).date()).days * 8
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'richmond_black_friday_2026.csv')
+    # Fail closed: never substitute products outside the approved campaign list.
+    with open(path, encoding='utf-8-sig', newline='') as source:
+        rows = list(csv.DictReader(source, delimiter=';'))
+    if len(rows) != 244 or len({r['ID produit'] for r in rows}) != 244:
+        raise ValueError('Liste Black Friday attendue: 244 produits uniques')
+    products = []
+    for row in rows[max(0, offset):max(0, offset) + 8]:
+        products.append({
+            'nom': row['Produit'], 'prix': row['Prix Black Friday TTC EUR'] + ' EUR',
+            'prix_val': float(row['Prix Black Friday TTC EUR'].replace(',', '.')),
+            'url': row['URL'], 'image_url': '', 'marque': 'richmond-interiors',
+        })
+    return products
+
+
+def black_friday_badge(image_bytes):
+    if not black_friday_active():
+        return image_bytes
+    from PIL import ImageFont
+    img = _open_rgb_on_white(image_bytes)
+    draw = ImageDraw.Draw(img)
+    box = (img.width - 238, 220, img.width - 38, 300)
+    draw.rounded_rectangle(box, radius=18, fill=(20, 20, 20), outline=(205, 173, 109), width=3)
+    try:
+        font = ImageFont.truetype('DejaVuSans-Bold.ttf', 22)
+    except OSError:
+        font = ImageFont.load_default(size=22)
+    draw.multiline_text(((box[0]+box[2])/2, 260), 'BLACK\nFRIDAY', font=font,
+                        fill=(255, 255, 255), anchor='mm', align='center', spacing=3)
+    output = io.BytesIO()
+    img.save(output, format='JPEG', quality=94)
+    return output.getvalue()
+
+
+_story_crop_without_badge = crop_to_916
+_reel_crop_without_badge = crop_to_916_reel
+_post_crop_without_badge = crop_to_45
+
+def crop_to_916(image_bytes):
+    return black_friday_badge(_story_crop_without_badge(image_bytes))
+
+def crop_to_916_reel(image_bytes):
+    return black_friday_badge(_reel_crop_without_badge(image_bytes))
+
+def crop_to_45(image_bytes):
+    return black_friday_badge(_post_crop_without_badge(image_bytes))
+
+
 if __name__ == "__main__":
     print("Bot Loft Attitude v18 - Stories lifestyle / Posts et Reels sur fond blanc")
     print(f"Stockage historique: {DATA_DIR} {'(persistant)' if DATA_DIR == '/data' else '(NON persistant - volume /data absent)'}")
@@ -1773,10 +1835,19 @@ if __name__ == "__main__":
     #   Paris 20h00 -> UTC 18h00  (story soir)
     # En heure d'hiver (CET = UTC+1), ajouter 1h a chaque horaire UTC.
     # Le bot utilise schedule sans timezone, donc on programme en UTC.
-    schedule.every().day.at("07:00").do(daily_dispatch_job)   # 09h Paris heure ete
-    schedule.every().day.at("08:00").do(story_job)             # 10h Paris heure ete
-    schedule.every().day.at("11:00").do(story_job)             # 13h Paris heure ete
-    schedule.every().day.at("15:00").do(story_job)             # 17h Paris heure ete
+    schedule.every().day.at('09:00', 'Europe/Paris').do(daily_dispatch_job)
+    def campaign_story_slot():
+        if black_friday_active():
+            story_job()
+
+    def regular_story_slot():
+        if not black_friday_active():
+            story_job()
+
+    for hour in ('09:30', '10:30', '11:30', '12:30', '14:00', '15:30', '17:00', '19:00'):
+        schedule.every().day.at(hour, 'Europe/Paris').do(campaign_story_slot)
+    for hour in ('10:00', '13:00', '17:00'):
+        schedule.every().day.at(hour, 'Europe/Paris').do(regular_story_slot)
     while True:
         try:
             schedule.run_pending()
