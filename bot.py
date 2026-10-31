@@ -1207,6 +1207,7 @@ def story_job():
             lifestyle_url = find_lifestyle_image_for_product(candidate)
             if lifestyle_url:
                 selected_product = candidate
+                _campaign_visual_context.product = candidate
                 selected_image_url = lifestyle_url
                 break  # On a trouve notre produit, on s'arrete
             else:
@@ -1466,6 +1467,7 @@ def daily_job():
     print(f"[{now}] Debut publication Loft Attitude")
     print(f"{'='*50}")
     product = get_next_product()
+    _campaign_visual_context.product = product or {}
     if not product:
         print("Pas de nouveau produit aujourd'hui.")
         return
@@ -1699,6 +1701,7 @@ def reel_job():
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"\n{'='*50}\n[{now}] Debut Reel Loft Attitude\n{'='*50}")
         product = get_next_product()
+        _campaign_visual_context.product = product or {}
         if not product:
             print("Pas de nouveau produit pour le reel aujourd'hui.")
             return
@@ -1767,24 +1770,63 @@ def black_friday_products_today():
             'nom': row['Produit'], 'prix': row['Prix Black Friday TTC EUR'] + ' EUR',
             'prix_val': float(row['Prix Black Friday TTC EUR'].replace(',', '.')),
             'url': row['URL'], 'image_url': '', 'marque': 'richmond-interiors',
+            'reference': row['Référence Richmond'],
         })
     return products
 
 
-def black_friday_badge(image_bytes):
+_campaign_visual_context = threading.local()
+
+
+def black_friday_badge(image_bytes, story=False):
     if not black_friday_active():
         return image_bytes
     from PIL import ImageFont
     img = _open_rgb_on_white(image_bytes)
     draw = ImageDraw.Draw(img)
-    box = (img.width - 238, 220, img.width - 38, 300)
-    draw.rounded_rectangle(box, radius=18, fill=(20, 20, 20), outline=(205, 173, 109), width=3)
-    try:
-        font = ImageFont.truetype('DejaVuSans-Bold.ttf', 22)
-    except OSError:
-        font = ImageFont.load_default(size=22)
-    draw.multiline_text(((box[0]+box[2])/2, 260), 'BLACK\nFRIDAY', font=font,
-                        fill=(255, 255, 255), anchor='mm', align='center', spacing=3)
+    def font(size):
+        try:
+            return ImageFont.truetype('DejaVuSans-Bold.ttf', size)
+        except OSError:
+            return ImageFont.load_default(size=size)
+
+    # Coordonnees adaptees aux formats 9:16 et 4:5, hors des controles Instagram.
+    top = 230 if story else 90
+    right = img.width - 40
+    left = right - 420
+    bottom = top + (220 if story else 175)
+    draw.rounded_rectangle((left, top, right, bottom), radius=24,
+                           fill=(20, 20, 20), outline=(205, 173, 109), width=3)
+    lines = ['BLACK FRIDAY', 'Jusqu\u2019a -50 %' if story else '-40 %']
+    if story:
+        lines.append('Offres Black Friday')
+        lines.append('Lien dans notre bio')
+    else:
+        lines.append('loftattitude.com')
+    draw.multiline_text(((left+right)/2, (top+bottom)/2), '\n'.join(lines),
+                        font=font(28), fill='white', anchor='mm', align='center', spacing=12)
+
+    product = getattr(_campaign_visual_context, 'product', {})
+    if not story and product.get('nom'):
+        import textwrap
+        diameter = 330
+        x, y = 40, img.height - diameter - 260
+        draw.ellipse((x, y, x+diameter, y+diameter), fill=(20, 20, 20),
+                     outline=(205, 173, 109), width=3)
+        label = product['nom']
+        reference = product.get('reference', '')
+        chosen = None
+        for size in range(25, 11, -1):
+            candidate_font = font(size)
+            wrapped = textwrap.wrap(label, width=max(14, int(440 / size)))
+            text = '\n'.join(wrapped + ([f'Ref. {reference}'] if reference else []))
+            bounds = draw.multiline_textbbox((0, 0), text, font=candidate_font, spacing=7)
+            if bounds[2]-bounds[0] <= diameter*0.76 and bounds[3]-bounds[1] <= diameter*0.66:
+                chosen = (text, candidate_font)
+                break
+        if chosen:
+            draw.multiline_text((x+diameter/2, y+diameter/2), chosen[0], font=chosen[1],
+                                fill='white', anchor='mm', align='center', spacing=7)
     output = io.BytesIO()
     img.save(output, format='JPEG', quality=94)
     return output.getvalue()
@@ -1795,7 +1837,7 @@ _reel_crop_without_badge = crop_to_916_reel
 _post_crop_without_badge = crop_to_45
 
 def crop_to_916(image_bytes):
-    return black_friday_badge(_story_crop_without_badge(image_bytes))
+    return black_friday_badge(_story_crop_without_badge(image_bytes), story=True)
 
 def crop_to_916_reel(image_bytes):
     return black_friday_badge(_reel_crop_without_badge(image_bytes))
