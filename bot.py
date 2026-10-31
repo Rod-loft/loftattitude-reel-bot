@@ -1262,7 +1262,11 @@ def story_job():
 
 def get_next_product():
     if black_friday_active():
-        return next((p for p in black_friday_products_today() if not already_published(p['url'])), None)
+        products = black_friday_products_today()
+        # Deux selections distinctes meme si la publication du matin echoue.
+        if getattr(_campaign_visual_context, 'reel_slot', False):
+            products = products[1:]
+        return next((p for p in products if not already_published(p['url'])), None)
     try:
         session = get_scrape_session()
         base_url = "https://www.loftattitude.com/fr/nouveaux-produits"
@@ -1739,6 +1743,10 @@ def reel_job():
 def daily_dispatch_job():
     """Alterne carrousel un jour, Reel le lendemain (base sur le jour de l'annee, stable aux redemarrages)."""
     try:
+        if black_friday_active():
+            print('Black Friday -> publication quotidienne a 09:00 Paris')
+            daily_job()
+            return
         day_of_year = datetime.now().timetuple().tm_yday
         if day_of_year % 2 == 0:
             print("Jour pair -> publication carrousel")
@@ -1748,6 +1756,18 @@ def daily_dispatch_job():
             reel_job()
     except Exception as e:
         print(f"Erreur dispatch quotidien (ignoree): {e}")
+
+def black_friday_reel_job():
+    """Second rendez-vous quotidien, uniquement durant la campagne."""
+    if not black_friday_active():
+        return
+    _campaign_visual_context.reel_slot = True
+    try:
+        print('Black Friday -> Reel quotidien a 18:00 Paris')
+        reel_job()
+    finally:
+        _campaign_visual_context.reel_slot = False
+
 
 def black_friday_active():
     now = datetime.now(PARIS_TZ) if PARIS_TZ else datetime.now()
@@ -1797,7 +1817,7 @@ def black_friday_badge(image_bytes, story=False):
     bottom = top + (220 if story else 175)
     draw.rounded_rectangle((left, top, right, bottom), radius=24,
                            fill=(20, 20, 20), outline=(205, 173, 109), width=3)
-    lines = ['BLACK FRIDAY', 'Jusqu\u2019a -50 %' if story else '-40 %']
+    lines = ['BLACK FRIDAY', 'Jusqu\u2019\u00e0 -50 %']
     if story:
         lines.append('Offres Black Friday')
         lines.append('Lien dans notre bio')
@@ -1855,7 +1875,7 @@ if __name__ == "__main__":
     print(f"Token IG:    {'OK' if IG_TOKEN else 'MANQUANT'}")
     print(f"Audio IG:    {'NATIF' if IG_NATIVE_AUDIO_TOKEN else 'LOCAL (IG_NATIVE_AUDIO_TOKEN manquant)'}")
     print(f"OpenAI:      {'OK' if OPENAI_KEY else 'MANQUANT'} ({OPENAI_MODEL})")
-    print("Publication feed/reel planifiee a 09:00 (alternee un jour sur deux)")
+    print('Black Friday: publication a 09:00 et Reel a 18:00 (Europe/Paris). Hors campagne: alternance a 09:00.')
     print("Stories planifiees a 12:30, 19:30\n")
     threading.Thread(target=start_flask_server, daemon=True).start()
     print(f"Serveur video demarre sur le port {os.environ.get('PORT', 8080)}\n")
@@ -1878,6 +1898,7 @@ if __name__ == "__main__":
     # En heure d'hiver (CET = UTC+1), ajouter 1h a chaque horaire UTC.
     # Le bot utilise schedule sans timezone, donc on programme en UTC.
     schedule.every().day.at('09:00', 'Europe/Paris').do(daily_dispatch_job)
+    schedule.every().day.at('18:00', 'Europe/Paris').do(black_friday_reel_job)
     def campaign_story_slot():
         if black_friday_active():
             story_job()
