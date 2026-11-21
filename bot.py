@@ -1,5 +1,6 @@
 import os, time, requests, schedule, json, base64, io, re, random, threading
 import numpy as np
+from urllib.parse import urljoin, urlsplit, unquote
 from datetime import datetime
 try:
     from zoneinfo import ZoneInfo
@@ -784,6 +785,19 @@ def get_scrape_session():
             _scrape_session.headers["X-Loft-Bot-Key"] = BOT_BYPASS_KEY
     return _scrape_session
 
+def _product_image_key(image_url):
+    """Regroupe les tailles et formats d'une meme photo, sans fusionner les vues."""
+    path = unquote(urlsplit(image_url).path).lower()
+    # PrestaShop conserve l'identifiant photo dans chaque declinaison de taille.
+    photo_id = re.search(r"/(\d+)(?:-[^/]+)?/[^/]+\.(?:jpe?g|png|webp)$", path)
+    if photo_id:
+        return ("prestashop", urlsplit(image_url).netloc.lower(), photo_id.group(1))
+    path = re.sub(r"\.(?:jpe?g|png|webp)$", "", path)
+    path = re.sub(r"(?:[-_](?:small|medium|large|\d+x\d+))+$", "", path)
+    return (urlsplit(image_url).netloc.lower(), path)
+
+
+def get_product_images(product_url):
 def get_product_images(product_url):
     try:
         session = get_scrape_session()
@@ -802,11 +816,18 @@ def get_product_images(product_url):
                 if src.startswith("/"):
                     src = "https://www.loftattitude.com" + src
                 if src and src not in seen and any(ext in src.lower() for ext in [".jpg", ".jpeg", ".png", ".webp"]):
+                src = img.get("data-image-large-src") or img.get("data-src") or img.get("src") or ""
+                src = urljoin(product_url, src) if src else ""
+                key = _product_image_key(src)
+                if src and key not in seen and any(ext in src.lower() for ext in [".jpg", ".jpeg", ".png", ".webp"]):
                     if not any(skip in src.lower() for skip in ["logo", "icon", "sprite", "thumb", "mini", "cart"]):
                         seen.add(src)
                         src_large = src.replace("-small","").replace("-medium","").replace("_small","").replace("_medium","")
                         images.append(src_large)
         print(f"Images trouvees: {len(images)}")
+                        seen.add(key)
+                        images.append(src)
+        print(f"Images distinctes trouvees: {len(images)}")
         return images
     except Exception as e:
         print(f"Erreur scraping images: {e}")
@@ -1139,11 +1160,14 @@ def find_lifestyle_image_for_product(product):
         print(f"  Aucune image trouvee pour: {product['nom']}")
         return None
 
+    all_images = list({ _product_image_key(url): url for url in reversed(all_images) }.values())[::-1]
     print(f"  Analyse de {min(len(all_images), 6)} images pour trouver une photo lifestyle...")
+    print(f"  Analyse de {len(all_images)} images distinctes pour trouver une photo lifestyle...")
     best_url = None
     best_score = -1
 
     for img_url in all_images[:6]:  # Max 6 images analysees par produit
+    for img_url in all_images:
         try:
             is_lifestyle, score, produit_entier = is_lifestyle_image(img_url)
             print(f"    {img_url[-50:]} -> lifestyle={is_lifestyle}, score={score}, entier={produit_entier}")
