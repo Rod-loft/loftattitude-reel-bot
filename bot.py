@@ -796,8 +796,6 @@ def _product_image_key(image_url):
     path = re.sub(r"(?:[-_](?:small|medium|large|\d+x\d+))+$", "", path)
     return (urlsplit(image_url).netloc.lower(), path)
 
-
-def get_product_images(product_url):
 def get_product_images(product_url):
     try:
         session = get_scrape_session()
