@@ -810,19 +810,11 @@ def get_product_images(product_url):
         seen = set()
         for sel in selectors:
             for img in soup.select(sel):
-                src = img.get("data-src") or img.get("data-image-large-src") or img.get("src") or ""
-                if src.startswith("/"):
-                    src = "https://www.loftattitude.com" + src
-                if src and src not in seen and any(ext in src.lower() for ext in [".jpg", ".jpeg", ".png", ".webp"]):
                 src = img.get("data-image-large-src") or img.get("data-src") or img.get("src") or ""
                 src = urljoin(product_url, src) if src else ""
                 key = _product_image_key(src)
                 if src and key not in seen and any(ext in src.lower() for ext in [".jpg", ".jpeg", ".png", ".webp"]):
                     if not any(skip in src.lower() for skip in ["logo", "icon", "sprite", "thumb", "mini", "cart"]):
-                        seen.add(src)
-                        src_large = src.replace("-small","").replace("-medium","").replace("_small","").replace("_medium","")
-                        images.append(src_large)
-        print(f"Images trouvees: {len(images)}")
                         seen.add(key)
                         images.append(src)
         print(f"Images distinctes trouvees: {len(images)}")
@@ -1159,12 +1151,10 @@ def find_lifestyle_image_for_product(product):
         return None
 
     all_images = list({ _product_image_key(url): url for url in reversed(all_images) }.values())[::-1]
-    print(f"  Analyse de {min(len(all_images), 6)} images pour trouver une photo lifestyle...")
     print(f"  Analyse de {len(all_images)} images distinctes pour trouver une photo lifestyle...")
     best_url = None
     best_score = -1
 
-    for img_url in all_images[:6]:  # Max 6 images analysees par produit
     for img_url in all_images:
         try:
             is_lifestyle, score, produit_entier = is_lifestyle_image(img_url)
